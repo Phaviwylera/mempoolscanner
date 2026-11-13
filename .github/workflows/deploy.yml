@@ -1,0 +1,54 @@
+name: Deploy to mempolscan in Ohio
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: mempolscan-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the commit being deployed
+        uses: actions/checkout@v7
+
+      - name: Obtain short-lived AWS credentials with GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: arn:aws:iam::835756673190:role/mempolscan-github-deploy
+          aws-region: us-east-2
+          role-session-name: mempolscan-${{ github.run_id }}
+
+      - name: Deploy this commit through Systems Manager
+        env:
+          INSTANCE_ID: i-0873e11dd856a2a1d
+          COMMIT_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          command_id="$(aws ssm send-command \
+            --document-name AWS-RunShellScript \
+            --instance-ids "$INSTANCE_ID" \
+            --comment "Deploy mempoolscanner ${COMMIT_SHA}" \
+            --timeout-seconds 3600 \
+            --parameters "commands=sudo /usr/local/sbin/mempolscan-deploy ${COMMIT_SHA}" \
+            --query 'Command.CommandId' --output text)"
+          echo "SSM command: ${command_id}"
+          aws ssm wait command-executed --command-id "$command_id" --instance-id "$INSTANCE_ID"
+          invocation="$(aws ssm get-command-invocation --command-id "$command_id" --instance-id "$INSTANCE_ID" --output json)"
+          echo "$invocation" | jq -r '.StandardOutputContent'
+          status="$(echo "$invocation" | jq -r '.Status')"
+          if [[ "$status" != "Success" ]]; then
+            echo "$invocation" | jq -r '.StandardErrorContent' >&2
+            exit 1
+          fi
+
