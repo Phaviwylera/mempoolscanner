@@ -2,6 +2,12 @@
 set -euo pipefail
 
 ROOT=/opt/mempoolscanner
+nginx -t
+systemctl enable --now nginx
+systemctl enable --now mempolscan-api.service
+systemctl restart mempolscan-api.service
+systemctl reload nginx
+
 systemctl enable mempolscan-anvil.service
 systemctl restart mempolscan-anvil.service
 
@@ -20,6 +26,11 @@ if [[ "$ready" != true ]]; then
   exit 1
 fi
 
+if ! curl --silent --show-error --fail 'http://127.0.0.1/api/hits?limit=1' >/dev/null; then
+  journalctl -u nginx.service -n 80 --no-pager
+  exit 1
+fi
+
 systemctl enable mempolscan.service
 systemctl restart mempolscan.service
 sleep 2
@@ -27,5 +38,5 @@ if ! systemctl is-active --quiet mempolscan.service; then
   journalctl -u mempolscan.service -n 80 --no-pager
   exit 1
 fi
-systemctl --no-pager --full status mempolscan-anvil.service mempolscan.service
+systemctl --no-pager --full status nginx.service mempolscan-api.service mempolscan-anvil.service mempolscan.service
 
