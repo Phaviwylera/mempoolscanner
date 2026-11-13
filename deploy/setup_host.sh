@@ -6,7 +6,7 @@ id -u mempolscan >/dev/null 2>&1 || useradd --system --create-home --home-dir /h
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y --no-install-recommends build-essential ca-certificates curl git jq python3 python3-dev python3-venv python3-pip
+apt-get install -y --no-install-recommends build-essential ca-certificates curl git jq nginx python3 python3-dev python3-venv python3-pip
 
 FOUNDRY_BIN=/home/mempolscan/.foundry/bin/anvil
 if [[ ! -x "$FOUNDRY_BIN" ]]; then
@@ -20,6 +20,11 @@ fi
 
 install -o root -g root -m 0644 "$ROOT/deploy/systemd/mempolscan-anvil.service" /etc/systemd/system/mempolscan-anvil.service
 install -o root -g root -m 0644 "$ROOT/deploy/systemd/mempolscan.service" /etc/systemd/system/mempolscan.service
+install -o root -g root -m 0644 "$ROOT/deploy/systemd/mempolscan-api.service" /etc/systemd/system/mempolscan-api.service
+install -o root -g root -m 0644 "$ROOT/deploy/nginx-mempolscan.conf" /etc/nginx/sites-available/mempolscan
+ln -sfn /etc/nginx/sites-available/mempolscan /etc/nginx/sites-enabled/mempolscan
+rm -f /etc/nginx/sites-enabled/default
+nginx -t
 
 if [[ ! -d "$ROOT/venv" ]]; then
   runuser -u mempolscan -- python3 -m venv "$ROOT/venv"
