@@ -394,7 +394,7 @@ async fn execute_revm_call(
     };
 
     match evm.transact_async(tx_env).await {
-        Ok(Ok(exec)) => match exec.result {
+        Ok(exec) => match exec.result {
             ExecutionResult::Success {
                 gas,
                 logs,
@@ -478,27 +478,12 @@ async fn execute_revm_call(
                 actor_token_transfers: 0,
             },
         },
-        Ok(Err(evm_err)) => RawExecOutcome {
+        Err(evm_err) => RawExecOutcome {
             sim: SimOutcome {
                 ok: false,
                 engine: "revm".to_string(),
                 gas_used: 0,
                 result_or_error: one_line_str(&format!("revm error: {evm_err}")),
-                revert_data: None,
-                revert_kind: None,
-                revert_reason: None,
-                transfers: Vec::new(),
-            },
-            actor_eth_gain_wei: 0,
-            actor_token_wei_equiv: 0,
-            actor_token_transfers: 0,
-        },
-        Err(async_err) => RawExecOutcome {
-            sim: SimOutcome {
-                ok: false,
-                engine: "revm".to_string(),
-                gas_used: 0,
-                result_or_error: one_line_str(&format!("async db error: {async_err}")),
                 revert_data: None,
                 revert_kind: None,
                 revert_reason: None,
