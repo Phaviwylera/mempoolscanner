@@ -7,6 +7,10 @@ systemctl enable --now nginx
 systemctl enable --now mempolscan-api.service
 systemctl restart mempolscan-api.service
 systemctl reload nginx
+if ! curl --silent --show-error --fail http://127.0.0.1/ >/dev/null; then
+  journalctl -u nginx.service -n 80 --no-pager
+  exit 1
+fi
 
 systemctl enable mempolscan-anvil.service
 systemctl restart mempolscan-anvil.service
