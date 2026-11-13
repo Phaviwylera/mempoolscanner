@@ -141,6 +141,24 @@ Press Ctrl-C. The monitor attempts to unsubscribe, flush queued JSONL records, a
 
 The Ohio EC2 deployment serves the read-only dashboard at `http://<instance-public-ip>/`. It polls `/api/hits` for the recent observations and `/api/quality` for fork quality every five seconds; both endpoints read the latest log entries and expose no write or transaction-broadcast operation. Each push to `main` is deployed to the instance through GitHub Actions and AWS Systems Manager.
 
+### Deployment verification
+
+After deploying, the workflow runs `deploy/verify_release.sh` on the instance over SSM. It:
+
+- fetches `http://127.0.0.1/api/quality?limit=1` through nginx and requires a `banner.state` of `green`, `amber`, `red`, or `unknown`, which also proves the `/api/quality` proxy location is in place;
+- requires `mempolscan.service` to be active;
+- waits up to 180 seconds for a record to be appended to `logs/hits.jsonl` and fails if the count does not move, printing the current banner and the last 60 journal lines as diagnostics.
+
+The wait is measured against the record count at the start of verification, so observations left over from an earlier deploy cannot make a broken scanner look healthy. A failure marks the workflow red but does not roll back: the new commit stays live until an earlier one is deployed.
+
+Run the same check by hand with a longer window:
+
+```bash
+sudo bash /opt/mempoolscanner/deploy/verify_release.sh 600
+```
+
+For a dry run off-instance, override `MEMPOLSCAN_ROOT`, `MEMPOLSCAN_QUALITY_URL` and `MEMPOLSCAN_SKIP_SERVICE_CHECK`.
+
 ## Responsible use
 
 Use only for contracts and bug-bounty programs you are authorized to test. Findings on third-party contracts should go through coordinated disclosure using the project's security contact, Immunefi, or SEAL 911. Do not take on-chain action based on this monitor's output.

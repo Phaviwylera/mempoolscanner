@@ -52,3 +52,31 @@ jobs:
             exit 1
           fi
 
+      - name: Verify the deployed instance
+        env:
+          INSTANCE_ID: i-0873e11dd856a2a1d
+          HITS_DEADLINE_SECONDS: "180"
+          COMMIT_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          command_id="$(aws ssm send-command \
+            --document-name AWS-RunShellScript \
+            --instance-ids "$INSTANCE_ID" \
+            --comment "Verify mempoolscanner endpoints and observations ${COMMIT_SHA:-}" \
+            --timeout-seconds 900 \
+            --parameters "commands=bash /opt/mempoolscanner/deploy/verify_release.sh ${HITS_DEADLINE_SECONDS}" \
+            --query 'Command.CommandId' --output text)"
+          echo "SSM command: ${command_id}"
+          # The waiter exits non-zero when the command fails; keep going so the
+          # remote output is printed before the job is marked failed.
+          aws ssm wait command-executed --command-id "$command_id" --instance-id "$INSTANCE_ID" || true
+          invocation="$(aws ssm get-command-invocation --command-id "$command_id" --instance-id "$INSTANCE_ID" --output json)"
+          echo "$invocation" | jq -r '.StandardOutputContent'
+          status="$(echo "$invocation" | jq -r '.Status')"
+          if [[ "$status" != "Success" ]]; then
+            echo "Verification finished with status: ${status}" >&2
+            echo "$invocation" | jq -r '.StandardErrorContent' >&2
+            exit 1
+          fi
+
