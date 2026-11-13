@@ -305,6 +305,80 @@ class PipelineSummaryTests(unittest.TestCase):
         self.assertEqual(ext_only["window"]["filtered"], 1)
         self.assertEqual(ext_only["pipeline"]["frontrun_counts"]["extractable"], 1)
 
+    def test_extractable_bar_totals_and_closed_removal(self) -> None:
+        records = [
+            {
+                "name": "claim",
+                "hash": "0x01",
+                "from": "0x11",
+                "to": "0x22",
+                "value": "0",
+                "selector": "0x4e71d92d",
+                "gas": 120000,
+                "tip": 1000000000,
+                "ts": "2026-11-13T12:00:00.000Z",
+                "fork": {"block": 100, "head": 100, "lag": 0, "code_present": True, "checked": [100, 99]},
+                "sim": {"ok": True, "engine": "revm", "gas_used": 44000, "result_or_error": "0x"},
+                "decision": {
+                    "status": "extractable",
+                    "would_frontrun": True,
+                    "gross_value_wei": "500000000000000000",
+                    "net_profit_wei": "45000000000000000",
+                    "probe_token_gains": 1,
+                },
+                "label": "candidate:claim",
+            },
+            {
+                "name": "withdraw",
+                "hash": "0x02",
+                "from": "0x33",
+                "to": "0x44",
+                "value": "0",
+                "selector": "0x2e1a7d4d",
+                "gas": 140000,
+                "tip": 1000000000,
+                "ts": "2026-11-13T12:00:02.000Z",
+                "fork": {"block": 100, "head": 100, "lag": 0, "code_present": True, "checked": [100, 99]},
+                "sim": {"ok": True, "engine": "revm", "gas_used": 51000, "result_or_error": "0x"},
+                "decision": {
+                    "status": "extractable",
+                    "would_frontrun": True,
+                    "gross_value_wei": "1250000000000000000",
+                    "net_profit_wei": "110000000000000000",
+                    "probe_token_gains": 0,
+                },
+                "label": "candidate:withdraw",
+            },
+            {
+                "name": "claim",
+                "hash": "0x03",
+                "closed": True,
+                "decision": {
+                    "status": "extractable",
+                    "would_frontrun": True,
+                    "gross_value_wei": "9000000000000000000",
+                    "net_profit_wei": "900000000000000000",
+                },
+                "label": "candidate:claim",
+            },
+        ]
+        res = hits_api.summarise_quality(
+            records,
+            filter_name="failed",
+            max_lag=MAX_LAG,
+            poll_seconds=POLL_SECONDS,
+            now=NOW,
+            meta={"total_pruned": 7, "total_observed": 25},
+        )
+        bar = res["extractable"]
+        self.assertEqual(bar["open_count"], 2)
+        self.assertEqual(bar["profitable_count"], 2)
+        self.assertEqual(bar["total_gross_wei"], "1750000000000000000")
+        self.assertEqual(bar["total_net_wei"], "155000000000000000")
+        self.assertEqual(bar["token_transfers"], 1)
+        self.assertEqual(bar["closed_removed"], 7)
+        self.assertEqual(bar["total_observed"], 25)
+
 
 if __name__ == "__main__":
     unittest.main()

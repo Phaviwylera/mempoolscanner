@@ -268,6 +268,9 @@ def summarise_pipeline(records: list[dict[str, object]]) -> dict[str, object]:
     categories = {"claim": 0, "withdraw": 0, "swap": 0, "liquidate": 0}
     would_frontrun = 0
     with_decision = 0
+    extractable_gross_wei = 0
+    extractable_net_wei = 0
+    extractable_token_gains = 0
 
     ingest_us: list[int] = []
     decode_us: list[int] = []
@@ -283,6 +286,16 @@ def summarise_pipeline(records: list[dict[str, object]]) -> dict[str, object]:
             fr_counts[st] += 1
             if bool(decision.get("would_frontrun")):
                 would_frontrun += 1
+            if st == "extractable":
+                gross = as_int(decision.get("gross_value_wei"))
+                if gross is not None and gross > 0:
+                    extractable_gross_wei += gross
+                net = as_int(decision.get("net_profit_wei"))
+                if net is not None and net > 0:
+                    extractable_net_wei += net
+                tg = as_int(decision.get("probe_token_gains"))
+                if tg is not None and tg > 0:
+                    extractable_token_gains += tg
 
         decoded = record.get("decoded")
         if isinstance(decoded, dict):
@@ -308,6 +321,9 @@ def summarise_pipeline(records: list[dict[str, object]]) -> dict[str, object]:
         "with_decision": with_decision,
         "would_frontrun": would_frontrun,
         "frontrun_counts": fr_counts,
+        "extractable_gross_wei": str(extractable_gross_wei),
+        "extractable_net_wei": str(extractable_net_wei),
+        "extractable_token_gains": extractable_token_gains,
         "categories": categories,
         "latency_us": {
             "median_ingest": median(ingest_us),
@@ -319,6 +335,67 @@ def summarise_pipeline(records: list[dict[str, object]]) -> dict[str, object]:
     }
 
 
+def summarise_extractable(
+    records: list[dict[str, object]],
+    *,
+    meta: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Aggregate live open extractable count, total gross/net wei value, and pruned closed count."""
+    open_count = 0
+    profitable_count = 0
+    total_gross_wei = 0
+    total_net_wei = 0
+    token_transfers = 0
+
+    for record in records:
+        if bool(record.get("closed")):
+            continue
+        if decision_status(record) != "extractable":
+            continue
+        open_count += 1
+        decision = record.get("decision")
+        if isinstance(decision, dict):
+            if bool(decision.get("would_frontrun")):
+                profitable_count += 1
+            gross = as_int(decision.get("gross_value_wei"))
+            if gross is not None and gross > 0:
+                total_gross_wei += gross
+            net = as_int(decision.get("net_profit_wei"))
+            if net is not None and net > 0:
+                total_net_wei += net
+            tg = as_int(decision.get("probe_token_gains"))
+            if tg is not None and tg > 0:
+                token_transfers += tg
+
+    meta_dict = meta if isinstance(meta, dict) else {}
+    closed_removed = as_int(meta_dict.get("total_pruned")) or 0
+    total_observed = as_int(meta_dict.get("total_observed"))
+    if total_observed is None:
+        total_observed = len(records)
+
+    return {
+        "open_count": open_count,
+        "profitable_count": profitable_count,
+        "total_gross_wei": str(total_gross_wei),
+        "total_net_wei": str(total_net_wei),
+        "token_transfers": token_transfers,
+        "closed_removed": closed_removed,
+        "total_observed": total_observed,
+    }
+
+
+def _read_scanner_meta(log_path: Path | None = None) -> dict[str, object]:
+    target_log = LOG_PATH if log_path is None else log_path
+    meta_path = target_log.parent / "scanner_meta.json"
+    if not meta_path.is_file():
+        return {}
+    try:
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
 def summarise_quality(
     records: list[dict[str, object]],
     *,
@@ -328,9 +405,14 @@ def summarise_quality(
     poll_seconds: float | None = None,
     now: float | None = None,
     banner_window: int = BANNER_WINDOW,
+    meta: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Summarise fork quality and Revm 5-stage pipeline telemetry."""
-    ordered = [record for record in records if isinstance(record, dict)]
+    ordered = [
+        record
+        for record in records
+        if isinstance(record, dict) and not bool(record.get("closed"))
+    ]
     resolved_filter = filter_name if filter_name in HIT_FILTERS else "all"
     filtered = [record for record in ordered if matches_filter(record, resolved_filter)]
     resolved_max_lag = fork_max_lag() if max_lag is None else max_lag
@@ -352,6 +434,7 @@ def summarise_quality(
             now=time.time() if now is None else now,
             window=banner_window,
         ),
+        "extractable": summarise_extractable(ordered, meta=meta),
         "rollup": summarise_rollup(filtered),
         "pipeline": summarise_pipeline(filtered),
     }
@@ -393,6 +476,7 @@ class HitsHandler(BaseHTTPRequestHandler):
             records,
             limit=limit,
             filter_name=filter_name,
+            meta=_read_scanner_meta(),
         )
         payload = json.dumps(summary, separators=(",", ":")).encode("utf-8")
         self._send_json(payload)
@@ -432,7 +516,9 @@ class HitsHandler(BaseHTTPRequestHandler):
                 record = json.loads(raw_line.decode("utf-8"))
             except (json.JSONDecodeError, TypeError):
                 continue
-            if not isinstance(record, dict):
+            if not isinstance(record, dict) or bool(record.get("closed")):
+                continue
+            if decision_status(record) == "beneficiary_locked":
                 continue
             tip_raw = record.get("tip")
             entry: dict[str, object] = {

@@ -30,6 +30,29 @@
       </header>
 
       <main id="top">
+        <div id="extractable-bar" class="extractable-bar" data-active="false" role="region" aria-label="Live extractable status and total value">
+          <div class="ext-bar-lead">
+            <span class="ext-bar-dot" aria-hidden="true"></span>
+            <span class="ext-bar-kicker">EXTRACTABLE</span>
+            <strong id="ext-bar-count">0 OPEN</strong>
+          </div>
+          <div class="ext-bar-divider" aria-hidden="true"></div>
+          <div class="ext-bar-metric">
+            <span>TOTAL EXTRACTABLE VALUE</span>
+            <strong id="ext-bar-total">0 ETH</strong>
+            <small id="ext-bar-usd">≈ $0.00</small>
+          </div>
+          <div class="ext-bar-metric">
+            <span>EST. NET VALUE</span>
+            <strong id="ext-bar-net">0 ETH</strong>
+            <small id="ext-bar-tokens">0 LIVE OPPORTUNITIES</small>
+          </div>
+          <div class="ext-bar-right">
+            <span id="ext-bar-purged" class="ext-bar-purged">CLOSED / USER-SETTLED TXS AUTO-REMOVED</span>
+            <button id="ext-bar-filter-btn" class="ext-bar-btn" type="button">VIEW EXTRACTABLE</button>
+          </div>
+        </div>
+
         <div id="fork-banner" class="fork-banner" data-state="unknown" role="status" aria-live="polite">
           <span class="fork-banner-mark" aria-hidden="true"></span>
           <b id="fork-banner-state">FORK HEALTH: UNKNOWN</b>
