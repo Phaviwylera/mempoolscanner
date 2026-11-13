@@ -114,8 +114,8 @@ impl ActiveHitStore {
                 .iter()
                 .filter_map(|e| serde_json::to_string(&e.record).ok())
                 .collect();
-            let _ = write_lines_atomic(&log_path, &lines);
-            let _ = write_meta_atomic(&meta_path, &meta);
+            write_jsonl_atomic(&log_path, &lines);
+            write_meta_atomic(&meta_path, &meta);
         }
 
         Self {
@@ -950,7 +950,7 @@ fn dispatch_full_tx(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::abi::{DecodedCall, SelectorCategory};
+    use crate::abi::DecodedCall;
     use crate::sim::{DecisionReport, ForkEvidence, SimOutcome, StageTelemetry};
 
     fn dummy_record(hash: &str, status: &str, gross_wei: &str) -> HitRecord {
@@ -988,13 +988,13 @@ mod tests {
             },
             decoded: DecodedCall {
                 signature: "claim()".to_string(),
-                category: SelectorCategory::Claim,
+                category: "claim".to_string(),
                 decode_ok: true,
                 recipient: None,
                 token_in: None,
                 token_out: None,
                 amount_in: None,
-                min_amount_out: None,
+                amount_out_min: None,
                 deadline: None,
                 summary: "claim()".to_string(),
             },
