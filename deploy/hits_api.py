@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
+import urllib.request
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -36,6 +38,132 @@ STALL_MULTIPLIER = 5
 QUALITY_KINDS = ("candidate", "state_dependent", "sim_failed", "no_code", "stale_fork", "other")
 FRONTRUN_STATUSES = ("extractable", "beneficiary_locked", "sender_protected", "not_applicable")
 HIT_FILTERS = ("all", "ok", "failed", "extractable")
+
+DEFAULT_ETH_INR = 260000.0
+FX_CACHE_TTL_SECONDS = 180.0
+_fx_lock = threading.Lock()
+_fx_state: dict[str, object] = {
+    "eth_inr": 0.0,
+    "source": "reference",
+    "updated_at": 0.0,
+    "refreshing": False,
+}
+
+
+def default_eth_inr() -> float:
+    return _env_float("MEMPOLSCAN_ETH_INR", DEFAULT_ETH_INR, minimum=1.0)
+
+
+def _format_indian_int(n: int) -> str:
+    s = str(abs(n))
+    if len(s) <= 3:
+        return s
+    last3 = s[-3:]
+    rest = s[:-3]
+    groups: list[str] = []
+    while len(rest) > 2:
+        groups.append(rest[-2:])
+        rest = rest[:-2]
+    if rest:
+        groups.append(rest)
+    groups.reverse()
+    return ",".join(groups) + "," + last3
+
+
+def format_inr_paise(paise: int, *, plus: bool = False) -> str:
+    neg = paise < 0
+    abs_p = abs(paise)
+    rupees = abs_p // 100
+    rem = abs_p % 100
+    prefix = "-" if neg else ("+" if (plus and abs_p > 0) else "")
+    return f"{prefix}₹{_format_indian_int(rupees)}.{rem:02d}"
+
+
+def wei_to_paise(wei: int, eth_inr: float) -> int:
+    if wei == 0 or eth_inr <= 0:
+        return 0
+    rate_paise = int(round(eth_inr * 100.0))
+    sign = -1 if wei < 0 else 1
+    return sign * ((abs(wei) * rate_paise) // (10**18))
+
+
+def _fetch_remote_eth_inr(timeout: float = 1.8) -> tuple[float, str] | None:
+    endpoints = (
+        (
+            "https://api.coinbase.com/v2/exchange-rates?currency=ETH",
+            "coinbase",
+        ),
+        (
+            "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=inr",
+            "coingecko",
+        ),
+    )
+    headers = {"User-Agent": "MempoolObservatory/2.0", "Accept": "application/json"}
+    for url, label in endpoints:
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - fixed HTTPS FX endpoints
+                data = json.loads(resp.read().decode("utf-8"))
+            if label == "coinbase":
+                raw_rate = data.get("data", {}).get("rates", {}).get("INR")
+            else:
+                raw_rate = data.get("ethereum", {}).get("inr")
+            rate = float(raw_rate)
+            if rate > 1000.0:
+                return (rate, label)
+        except Exception:
+            continue
+    return None
+
+
+def _refresh_fx_worker() -> None:
+    fetched = _fetch_remote_eth_inr(timeout=2.0)
+    with _fx_lock:
+        if fetched is not None:
+            _fx_state["eth_inr"] = fetched[0]
+            _fx_state["source"] = fetched[1]
+        elif float(_fx_state.get("eth_inr") or 0.0) <= 0.0:
+            _fx_state["eth_inr"] = default_eth_inr()
+            _fx_state["source"] = "reference"
+        _fx_state["updated_at"] = time.time()
+        _fx_state["refreshing"] = False
+
+
+def get_live_eth_inr() -> tuple[float, str]:
+    override = os.getenv("MEMPOLSCAN_ETH_INR", "").strip()
+    if override:
+        try:
+            val = float(override)
+            if val > 0:
+                return (val, "env")
+        except ValueError:
+            pass
+
+    now = time.time()
+    need_sync = False
+    spawn_bg = False
+    with _fx_lock:
+        cur = float(_fx_state.get("eth_inr") or 0.0)
+        updated = float(_fx_state.get("updated_at") or 0.0)
+        refreshing = bool(_fx_state.get("refreshing"))
+        if cur <= 0.0 and not refreshing:
+            _fx_state["refreshing"] = True
+            need_sync = True
+        elif (now - updated) >= FX_CACHE_TTL_SECONDS and not refreshing:
+            _fx_state["refreshing"] = True
+            spawn_bg = True
+
+    if need_sync:
+        _refresh_fx_worker()
+    elif spawn_bg:
+        threading.Thread(target=_refresh_fx_worker, daemon=True).start()
+
+    with _fx_lock:
+        final_rate = float(_fx_state.get("eth_inr") or 0.0)
+        final_src = str(_fx_state.get("source") or "reference")
+    if final_rate <= 0.0:
+        return (default_eth_inr(), "reference")
+    return (final_rate, final_src)
 
 
 def _env_int(name: str, default: int, minimum: int = 0) -> int:
@@ -339,8 +467,11 @@ def summarise_extractable(
     records: list[dict[str, object]],
     *,
     meta: dict[str, object] | None = None,
+    eth_inr: float | None = None,
+    rate_source: str = "reference",
 ) -> dict[str, object]:
-    """Aggregate live open extractable count, total gross/net wei value, and pruned closed count."""
+    """Aggregate live open extractable count, total gross/net INR & wei value, and pruned count."""
+    resolved_rate = default_eth_inr() if eth_inr is None else eth_inr
     open_count = 0
     profitable_count = 0
     total_gross_wei = 0
@@ -373,11 +504,21 @@ def summarise_extractable(
     if total_observed is None:
         total_observed = len(records)
 
+    gross_paise = wei_to_paise(total_gross_wei, resolved_rate)
+    net_paise = wei_to_paise(total_net_wei, resolved_rate)
+
     return {
+        "currency": "INR",
+        "eth_inr_rate": round(resolved_rate, 2),
+        "rate_source": rate_source,
         "open_count": open_count,
         "profitable_count": profitable_count,
         "total_gross_wei": str(total_gross_wei),
         "total_net_wei": str(total_net_wei),
+        "total_gross_paise": str(gross_paise),
+        "total_net_paise": str(net_paise),
+        "total_gross_inr": format_inr_paise(gross_paise),
+        "total_net_inr": format_inr_paise(net_paise, plus=net_paise > 0),
         "token_transfers": token_transfers,
         "closed_removed": closed_removed,
         "total_observed": total_observed,
@@ -406,6 +547,8 @@ def summarise_quality(
     now: float | None = None,
     banner_window: int = BANNER_WINDOW,
     meta: dict[str, object] | None = None,
+    eth_inr: float | None = None,
+    rate_source: str = "reference",
 ) -> dict[str, object]:
     """Summarise fork quality and Revm 5-stage pipeline telemetry."""
     ordered = [
@@ -417,6 +560,7 @@ def summarise_quality(
     filtered = [record for record in ordered if matches_filter(record, resolved_filter)]
     resolved_max_lag = fork_max_lag() if max_lag is None else max_lag
     resolved_poll = fork_poll_seconds() if poll_seconds is None else poll_seconds
+    resolved_rate = default_eth_inr() if eth_inr is None else eth_inr
     return {
         "window": {
             "requested": limit,
@@ -427,6 +571,11 @@ def summarise_quality(
             "max_lag": resolved_max_lag,
             "poll_seconds": resolved_poll,
         },
+        "fx": {
+            "currency": "INR",
+            "eth_inr": round(resolved_rate, 2),
+            "source": rate_source,
+        },
         "banner": summarise_banner(
             ordered,
             max_lag=resolved_max_lag,
@@ -434,7 +583,12 @@ def summarise_quality(
             now=time.time() if now is None else now,
             window=banner_window,
         ),
-        "extractable": summarise_extractable(ordered, meta=meta),
+        "extractable": summarise_extractable(
+            ordered,
+            meta=meta,
+            eth_inr=resolved_rate,
+            rate_source=rate_source,
+        ),
         "rollup": summarise_rollup(filtered),
         "pipeline": summarise_pipeline(filtered),
     }
@@ -463,7 +617,18 @@ class HitsHandler(BaseHTTPRequestHandler):
     def _serve_hits(self, query: dict[str, list[str]]) -> None:
         limit = bounded_limit(query.get("limit", ["50"])[0], 50)
         hits = self._read_recent(limit)
-        payload = json.dumps({"hits": hits}, separators=(",", ":")).encode("utf-8")
+        eth_inr, rate_source = get_live_eth_inr()
+        payload = json.dumps(
+            {
+                "hits": hits,
+                "fx": {
+                    "currency": "INR",
+                    "eth_inr": round(eth_inr, 2),
+                    "source": rate_source,
+                },
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
         self._send_json(payload)
 
     def _serve_quality(self, query: dict[str, list[str]]) -> None:
@@ -472,11 +637,14 @@ class HitsHandler(BaseHTTPRequestHandler):
         if filter_name not in HIT_FILTERS:
             filter_name = "all"
         records = self._read_recent(limit)
+        eth_inr, rate_source = get_live_eth_inr()
         summary = summarise_quality(
             records,
             limit=limit,
             filter_name=filter_name,
             meta=_read_scanner_meta(),
+            eth_inr=eth_inr,
+            rate_source=rate_source,
         )
         payload = json.dumps(summary, separators=(",", ":")).encode("utf-8")
         self._send_json(payload)

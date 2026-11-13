@@ -23,7 +23,38 @@ const PROBE_TEXT = {
   not_applicable: "N/A",
 };
 
-const state = { hits: [], filter: "all", online: false, quality: null };
+const DEFAULT_ETH_INR = 260000;
+const state = { hits: [], filter: "all", online: false, quality: null, ethInr: DEFAULT_ETH_INR, fxSource: "reference" };
+
+function currentEthInr() {
+  const qRate = Number(state.quality?.fx?.eth_inr || state.quality?.extractable?.eth_inr_rate || 0);
+  if (Number.isFinite(qRate) && qRate > 0) return qRate;
+  if (Number.isFinite(state.ethInr) && state.ethInr > 0) return state.ethInr;
+  return DEFAULT_ETH_INR;
+}
+
+const INR_FORMATTER = new Intl.NumberFormat("en-IN", {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+function formatInrFromWei(weiStr, ethInr = currentEthInr(), { plus = false } = {}) {
+  try {
+    const raw = String(weiStr ?? "0").trim();
+    if (!raw || raw === "0") return "₹0.00";
+    const neg = raw.startsWith("-");
+    const clean = neg ? raw.slice(1) : raw;
+    const wei = BigInt(clean || "0");
+    if (wei === 0n) return "₹0.00";
+    const ratePaise = BigInt(Math.max(1, Math.round(Number(ethInr || DEFAULT_ETH_INR) * 100)));
+    const paise = (wei * ratePaise) / (10n ** 18n);
+    const rupees = Number(paise) / 100;
+    const sign = neg ? "-" : (plus && paise > 0n ? "+" : "");
+    return `${sign}₹${INR_FORMATTER.format(rupees)}`;
+  } catch {
+    return "₹0.00";
+  }
+}
 
 const $ = (selector) => document.querySelector(selector);
 const shortHash = (value = "") => value.length > 18 ? `${value.slice(0, 10)}…${value.slice(-6)}` : value || "—";
@@ -250,7 +281,12 @@ function buildEvidence(hit) {
 
     const verdict = document.createElement("p");
     verdict.className = "decision-verdict";
-    verdict.textContent = decision.verdict || st;
+    if (st === "extractable" && decision.would_frontrun && decision.net_profit_wei && decision.net_profit_wei !== "0") {
+      const modeLabel = decision.probe_mode || "probe";
+      verdict.textContent = `READ-ONLY EXTRACTABLE (${modeLabel}) · counterfactual replay est. ${formatInrFromWei(decision.net_profit_wei, currentEthInr(), { plus: true })} net`;
+    } else {
+      verdict.textContent = decision.verdict || st;
+    }
     wrap.append(verdict);
   }
 
@@ -297,7 +333,12 @@ function buildEvidence(hit) {
       : `${fork.head} · lag ${lag}${stale ? " ⚠" : ""}`;
   row("HEAD / LAG", headText, stale);
   row("GAS USED", hit.sim && hit.sim.gas_used ? Number(hit.sim.gas_used).toLocaleString() : shown(hit.gas));
-  row("NET PROFIT EST", decision && decision.net_profit_wei && decision.net_profit_wei !== "0" ? formatWei(decision.net_profit_wei) : "0 ETH");
+  row(
+    "NET PROFIT EST",
+    decision && decision.net_profit_wei && decision.net_profit_wei !== "0"
+      ? formatInrFromWei(decision.net_profit_wei, currentEthInr(), { plus: true })
+      : "₹0.00"
+  );
   if (telemetry) {
     row("REVM SIM", formatUs(telemetry.sim_us));
     row("PROBE SIM", formatUs(telemetry.probe_us));
@@ -381,7 +422,7 @@ function renderTable() {
     row.append(
       makeCell(shortAddress(hit.from), "address"),
       makeCell(shortAddress(hit.to), "address"),
-      makeCell(formatWei(hit.value)),
+      makeCell(formatInrFromWei(hit.value)),
       makeCell(gasDisplayed.toLocaleString()),
     );
 
@@ -392,7 +433,7 @@ function renderTable() {
     pChip.dataset.kind = dStatus;
     let probeLabel = PROBE_TEXT[dStatus] || "N/A";
     if (dStatus === "extractable" && hit.decision && hit.decision.would_frontrun && hit.decision.net_profit_wei !== "0") {
-      probeLabel = `+${formatWei(hit.decision.net_profit_wei, 18, 4, " ETH")}`;
+      probeLabel = formatInrFromWei(hit.decision.net_profit_wei, currentEthInr(), { plus: true });
     }
     pChip.textContent = probeLabel;
     probeCell.append(pChip);
@@ -420,21 +461,6 @@ function renderTable() {
   }
 }
 
-function formatUsdFromWei(weiStr, ethUsd = 3000) {
-  try {
-    const raw = String(weiStr ?? "0").trim();
-    if (!raw || raw.startsWith("-")) return "≈ $0.00";
-    const wei = BigInt(raw);
-    if (wei <= 0n) return "≈ $0.00";
-    // Compute cents with BigInt precision: wei * (ethUsd * 100) / 1e18
-    const cents = (wei * BigInt(Math.round(ethUsd * 100))) / (10n ** 18n);
-    const dollars = Number(cents) / 100;
-    return `≈ $${dollars.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  } catch {
-    return "≈ $0.00";
-  }
-}
-
 function syncFilterButtons() {
   const filterChip = $("#clear-filter");
   if (filterChip && filterChip.firstChild) {
@@ -454,6 +480,8 @@ function renderExtractableBar() {
   if (!bar) return;
 
   const qExt = state.quality && state.quality.extractable ? state.quality.extractable : null;
+  const ethInr = currentEthInr();
+  const fxSrc = String(state.quality?.fx?.source || state.fxSource || "reference");
   const openHits = state.hits.filter((h) => !h.closed && decisionStatus(h) === "extractable");
 
   let openCount = openHits.length;
@@ -487,9 +515,14 @@ function renderExtractableBar() {
 
   bar.dataset.active = openCount > 0 ? "true" : "false";
   $("#ext-bar-count").textContent = `${openCount.toLocaleString()} OPEN`;
-  $("#ext-bar-total").textContent = formatWei(grossWei.toString(), 18, 5, " ETH");
-  $("#ext-bar-usd").textContent = formatUsdFromWei(grossWei.toString());
-  $("#ext-bar-net").textContent = netWei > 0n ? `+${formatWei(netWei.toString(), 18, 5, " ETH")}` : "0 ETH";
+  $("#ext-bar-total").textContent = formatInrFromWei(grossWei.toString(), ethInr);
+  const rateNote = $("#ext-bar-rate");
+  if (rateNote) {
+    rateNote.textContent = fxSrc !== "reference" ? "LIVE INR" : "INR";
+  }
+  $("#ext-bar-net").textContent = netWei > 0n
+    ? formatInrFromWei(netWei.toString(), ethInr, { plus: true })
+    : "₹0.00";
 
   const tokenNote = $("#ext-bar-tokens");
   if (openCount === 0) {
@@ -535,6 +568,11 @@ async function refreshQuality() {
     const response = await fetch(`/api/quality?limit=100&filter=${encodeURIComponent(state.filter)}`, { cache: "no-store", headers: { Accept: "application/json" } });
     if (!response.ok) throw new Error(`quality feed returned ${response.status}`);
     state.quality = await response.json();
+    const qRate = Number(state.quality?.fx?.eth_inr || 0);
+    if (Number.isFinite(qRate) && qRate > 0) {
+      state.ethInr = qRate;
+      state.fxSource = String(state.quality?.fx?.source || "reference");
+    }
   } catch {
     state.quality = null;
   }
@@ -543,6 +581,7 @@ async function refreshQuality() {
   renderRollup(state.quality);
   const latest = state.hits[0];
   if (latest) renderLatest(latest);
+  renderTable();
 }
 
 async function refresh() {
@@ -551,6 +590,10 @@ async function refresh() {
     if (!response.ok) throw new Error(`feed returned ${response.status}`);
     const payload = await response.json();
     if (!Array.isArray(payload.hits)) throw new Error("invalid feed response");
+    if (payload.fx && Number(payload.fx.eth_inr) > 0) {
+      state.ethInr = Number(payload.fx.eth_inr);
+      state.fxSource = String(payload.fx.source || "reference");
+    }
     state.hits = payload.hits.filter((h) => !h.closed && decisionStatus(h) !== "beneficiary_locked");
     setOnline(true);
     $("#updated-at").textContent = `UPDATED ${new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" })} UTC`;
