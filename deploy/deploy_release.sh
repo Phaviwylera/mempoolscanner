@@ -29,6 +29,16 @@ if ! curl --retry 10 --retry-delay 1 --retry-all-errors --silent --show-error --
   exit 1
 fi
 
+if ! curl --retry 10 --retry-delay 1 --retry-all-errors --silent --show-error --fail 'http://127.0.0.1/liquidations.html' >/dev/null; then
+  journalctl -u nginx.service -n 80 --no-pager
+  exit 1
+fi
+
+if ! curl --retry 10 --retry-delay 1 --retry-all-errors --silent --show-error --fail 'http://127.0.0.1/api/liquidations?limit=5' >/dev/null; then
+  journalctl -u mempolscan-api.service -n 80 --no-pager
+  exit 1
+fi
+
 systemctl reset-failed mempolscan.service || true
 systemctl enable mempolscan.service
 systemctl restart mempolscan.service

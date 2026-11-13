@@ -100,3 +100,75 @@
 .ext-bar-btn:hover,.ext-bar-btn[data-filtering="true"]{border-color:#ffcf6e;color:#ffcf6e;background:#f3c96914}
 @media(max-width:1050px){.fork-body{grid-template-columns:1fr}.fork-aside{border-left:0;border-top:1px solid var(--border);padding-left:0;padding-top:14px}.ext-bar-right{margin-left:0}}
 @media(max-width:760px){.extractable-bar{gap:10px;padding:10px 12px}.ext-bar-divider{display:none}.fork-banner{font-size:8px;gap:8px}.fork-banner-meta{margin-left:0}.fork-row{grid-template-columns:104px minmax(0,1fr) 84px}.fork-fields{grid-template-columns:1fr}.fork-legend li{grid-template-columns:1fr;gap:3px}}
+
+/* ---- cross-page liquidation button & standalone /liquidations.html styles ---- */
+.nav-liq-btn{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;border:1px solid #493857;border-radius:3px;background:linear-gradient(135deg,#181224,#10131e);color:#f3d2ff;text-decoration:none;font:8.5px var(--mono);letter-spacing:.12em;white-space:nowrap;box-shadow:0 0 16px rgba(250,91,179,.09)}
+.nav-liq-btn span{color:var(--pink);font-size:10px}
+.nav-liq-btn:hover{border-color:var(--pink);color:var(--white);box-shadow:0 0 18px rgba(250,91,179,.22)}
+.nav-back-btn{border-color:#2a4846;background:linear-gradient(135deg,#0f1a1c,#0e111a);color:#b9f5eb;box-shadow:0 0 14px rgba(101,230,210,.08)}
+.nav-back-btn:hover{border-color:var(--cyan);color:var(--white);box-shadow:0 0 18px rgba(101,230,210,.2)}
+.liq-table th{text-align:left;font:7px var(--mono);letter-spacing:.08em;font-weight:400;color:#646b7c;padding:13px 14px;border-bottom:1px solid #1e222c;white-space:nowrap}
+.liq-table td{padding:12px 14px;border-bottom:1px solid #171b24;color:#a5abbb;font:8px var(--mono);white-space:nowrap;vertical-align:middle}
+.liq-sub{display:block;margin-top:3px;font:7px var(--mono);color:#666e82}
+.liq-val-inr{font:600 11.5px var(--sans);color:#eef1f9;letter-spacing:-.01em}
+.liq-bounty-pos{color:#ffcf6e;font-weight:600}
+.liq-bounty-proj{color:#8ae0d1}
+.liq-hf-wrap{display:flex;flex-direction:column;gap:5px;min-width:108px}
+.liq-hf-top{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font:600 11px var(--mono)}
+.liq-hf-num[data-band="liquidatable"]{color:#ff6f8b}
+.liq-hf-num[data-band="critical"]{color:#ffcf6e}
+.liq-hf-num[data-band="at_risk"]{color:#b8a9ff}
+.liq-hf-num[data-band="healthy"]{color:var(--green)}
+.liq-bar-track{display:block;width:100%;height:5px;background:#141824;border:1px solid #1f2434;border-radius:3px;overflow:hidden}
+.liq-bar-fill{display:block;height:100%;background:var(--green);border-radius:2px;transition:width .3s ease}
+.liq-bar-fill[data-band="liquidatable"]{background:#ff6f8b;box-shadow:0 0 8px #ff6f8b88}
+.liq-bar-fill[data-band="critical"]{background:#ffcf6e}
+.liq-bar-fill[data-band="at_risk"]{background:var(--violet)}
+.liq-bar-fill.w-0{width:0%}.liq-bar-fill.w-5{width:5%}.liq-bar-fill.w-10{width:10%}.liq-bar-fill.w-15{width:15%}.liq-bar-fill.w-20{width:20%}
+.liq-bar-fill.w-25{width:25%}.liq-bar-fill.w-30{width:30%}.liq-bar-fill.w-35{width:35%}.liq-bar-fill.w-40{width:40%}.liq-bar-fill.w-45{width:45%}
+.liq-bar-fill.w-50{width:50%}.liq-bar-fill.w-55{width:55%}.liq-bar-fill.w-60{width:60%}.liq-bar-fill.w-65{width:65%}.liq-bar-fill.w-70{width:70%}
+.liq-bar-fill.w-75{width:75%}.liq-bar-fill.w-80{width:80%}.liq-bar-fill.w-85{width:85%}.liq-bar-fill.w-90{width:90%}.liq-bar-fill.w-95{width:95%}
+.liq-bar-fill.w-100{width:100%}
+.liq-status-chip{display:inline-flex;align-items:center;gap:5px;padding:3px 7px;border:1px solid var(--border);border-radius:3px;font:7.5px var(--mono);letter-spacing:.07em;text-transform:uppercase}
+.liq-status-chip[data-band="liquidatable"]{color:#ff8ea6;border-color:#682b3b;background:#ff6f8b14}
+.liq-status-chip[data-band="critical"]{color:#ffcf6e;border-color:#664e21;background:#f3c96914}
+.liq-status-chip[data-band="at_risk"]{color:#c4b5ff;border-color:#3f3569;background:#a68aff12}
+.liq-status-chip[data-band="healthy"]{color:var(--green);border-color:#264c38;background:#85e8ae0c}
+.liq-status-chip[data-band="no_debt"]{color:var(--muted)}
+.liq-sim-btn{border:1px solid #30374c;background:#121622;color:#cfd6e6;padding:4px 8px;border-radius:3px;font:7.5px var(--mono);letter-spacing:.07em;cursor:pointer;margin-left:6px}
+.liq-sim-btn:hover{border-color:var(--cyan);color:var(--cyan)}
+.liq-revm-tag{display:inline-block;margin-left:5px;padding:2px 5px;border:1px solid #2b4d4a;border-radius:2px;color:var(--cyan);font:6.5px var(--mono);letter-spacing:.06em}
+.liq-sim-panel{padding:16px 19px 18px;display:flex;flex-direction:column;gap:14px}
+.liq-preset-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.liq-pill-btn{border:1px solid #2b3144;background:#101420;color:#b8c0d4;padding:6px 10px;border-radius:3px;font:7.5px var(--mono);letter-spacing:.08em;cursor:pointer}
+.liq-pill-btn:hover,.liq-pill-btn[data-active="true"]{border-color:var(--cyan);color:var(--white);background:#65e6d212}
+.liq-pill-btn.pink[data-active="true"],.liq-pill-btn.pink:hover{border-color:var(--pink);color:#ffd2ec;background:#fa5bb314}
+.liq-pos-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;padding:12px 14px;border:1px solid #1f2434;border-radius:4px;background:#0b0d15}
+.liq-pos-summary div{display:flex;flex-direction:column;gap:4px;min-width:0}
+.liq-pos-summary span{font:7.5px var(--mono);letter-spacing:.09em;color:var(--muted)}
+.liq-pos-summary strong{font:600 13px var(--sans);color:var(--white);overflow:hidden;text-overflow:ellipsis}
+.liq-pos-summary small{font:7.5px var(--mono);color:#7e869b}
+.liq-shock-box{padding:12px 14px;border:1px solid #23283a;border-radius:4px;background:#0c0f18;display:flex;flex-direction:column;gap:9px}
+.liq-shock-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;font:8px var(--mono);letter-spacing:.09em;color:var(--soft)}
+.liq-shock-head strong{color:var(--cyan);font-size:10px}
+.liq-range{width:100%;accent-color:var(--pink);cursor:pointer}
+.liq-shock-Quick{display:flex;flex-wrap:wrap;gap:6px}
+.liq-steps{display:grid;gap:8px}
+.liq-step{display:grid;grid-template-columns:30px minmax(0,1fr) auto;align-items:center;gap:11px;padding:10px 12px;border:1px solid #1d2231;border-radius:4px;background:#0b0e16}
+.liq-step-num{width:24px;height:24px;border:1px solid #2d354b;border-radius:50%;display:grid;place-items:center;font:8px var(--mono);color:var(--cyan)}
+.liq-step-body{display:flex;flex-direction:column;gap:3px;min-width:0}
+.liq-step-body b{font:600 10.5px var(--sans);color:#e9ecf5}
+.liq-step-body small{font:7.5px var(--mono);color:#788095;white-space:normal;line-height:1.45}
+.liq-step-val{text-align:right;font:600 12px var(--sans);color:var(--white);white-space:nowrap}
+.liq-step-val small{display:block;font:7.5px var(--mono);color:#737b90;margin-top:2px;font-weight:400}
+.liq-step.final-step[data-profitable="true"]{border-color:#69501e;background:linear-gradient(90deg,rgba(255,207,110,.09),#0b0e16)}
+.liq-step.final-step[data-profitable="true"] .liq-step-val{color:#ffcf6e}
+.liq-step.final-step[data-profitable="false"]{border-color:#3a2838}
+.liq-inspect-box{padding:14px 17px;display:flex;flex-direction:column;gap:10px}
+.liq-inspect-form{display:flex;gap:8px}
+.liq-input{flex:1;min-width:0;background:#090b12;border:1px solid #262c3f;border-radius:3px;padding:8px 10px;color:var(--white);font:8.5px var(--mono)}
+.liq-input:focus{outline:none;border-color:var(--cyan)}
+.liq-inspect-result{padding:10px 12px;border:1px dashed #272d40;border-radius:4px;background:#0a0d14;font:8px/1.6 var(--mono);color:var(--soft)}
+.liq-formula-code{margin:0 17px 12px;padding:9px 11px;border:1px solid #202638;border-radius:3px;background:#090b12;font:8px/1.6 var(--mono);color:var(--cyan)}
+@media(max-width:760px){.liq-pos-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.liq-step{grid-template-columns:26px minmax(0,1fr)}.liq-step-val{grid-column:2;text-align:left}}
+

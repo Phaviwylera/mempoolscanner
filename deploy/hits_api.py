@@ -614,6 +614,365 @@ def summarise_quality(
     }
 
 
+AAVE_V3_POOL_HEX = "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"
+AAVE_V3_ORACLE_HEX = "0x54586bE62E3c3580375aE3723C145253060Ca0C2"
+LIQ_FILTERS = ("all", "liquidatable", "at_risk")
+DEFAULT_USD_INR = 86.0
+
+
+def _liquidation_snapshot_path(log_path: Path | None = None) -> Path:
+    override = os.getenv("MEMPOLSCAN_LIQ_PATH", "").strip()
+    if override:
+        return Path(override)
+    base = log_path if log_path is not None else LOG_PATH
+    return base.parent / "liquidations.json"
+
+
+def _read_liquidation_snapshot(log_path: Path | None = None) -> dict[str, object] | None:
+    path = _liquidation_snapshot_path(log_path)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+
+
+def _resolve_http_rpc() -> str:
+    for key in ("HTTP_RPC", "WS_RPC"):
+        raw = os.getenv(key, "").strip().strip('"').strip("'")
+        if not raw:
+            continue
+        if raw.startswith("https://") or raw.startswith("http://"):
+            return raw
+        if raw.startswith("wss://"):
+            return "https://" + raw[len("wss://") :]
+        if raw.startswith("ws://"):
+            return "http://" + raw[len("ws://") :]
+    return "https://ethereum-rpc.publicnode.com"
+
+
+def usd_to_paise(usd_val: float, usd_inr: float) -> int:
+    if not usd_val or usd_inr <= 0:
+        return 0
+    return int(round(usd_val * usd_inr * 100.0))
+
+
+def format_usd_as_inr(usd_val: float, usd_inr: float, *, plus: bool = False) -> str:
+    return format_inr_paise(usd_to_paise(usd_val, usd_inr), plus=plus)
+
+
+def resolve_usd_inr(eth_inr: float, eth_price_usd: float) -> float:
+    if eth_inr > 0 and eth_price_usd > 100.0:
+        derived = eth_inr / eth_price_usd
+        if 60.0 <= derived <= 130.0:
+            return derived
+    return DEFAULT_USD_INR
+
+
+def compute_flash_plan_dict(
+    collateral_usd: float,
+    debt_usd: float,
+    health_factor: float,
+    eth_price_usd: float,
+    base_fee_gwei: float = 1.0,
+    close_factor: float = 0.50,
+) -> tuple[float, float, dict[str, object]]:
+    safe_hf = health_factor if (health_factor > 0) else 99.0
+    drop_pct = 0.0 if safe_hf <= 1.0 else max(0.0, min(99.99, (1.0 - (1.0 / safe_hf)) * 100.0))
+    eth_liq_usd = (eth_price_usd / safe_hf) if (eth_price_usd > 0 and 0 < safe_hf < 50.0) else 0.0
+
+    cf = max(0.05, min(1.0, close_factor))
+    bonus_rate = 0.05
+    flash_fee_rate = 0.0005
+    dex_fee_rate = 0.001
+    est_gas_eth = (380_000 * max(0.1, base_fee_gwei)) / 1e9
+    est_gas_usd = est_gas_eth * max(1.0, eth_price_usd)
+
+    def _eval(col_val: float) -> tuple[float, float, float, float, float, float]:
+        if debt_usd <= 0.0 or col_val <= 0.0:
+            return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        debt_to_cover = max(0.0, min(debt_usd * cf, col_val / (1.0 + bonus_rate)))
+        seized = min(col_val, debt_to_cover * (1.0 + bonus_rate))
+        gross = max(0.0, seized - debt_to_cover)
+        f_fee = debt_to_cover * flash_fee_rate
+        d_fee = seized * dex_fee_rate
+        net = gross - f_fee - d_fee - est_gas_usd
+        return (debt_to_cover, seized, gross, f_fee, d_fee, net)
+
+    if safe_hf < 1.0:
+        dtc, seized, gross, f_fee, d_fee, raw_net = _eval(collateral_usd)
+    else:
+        dtc, seized, gross, f_fee, d_fee, raw_net = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    trig_col = collateral_usd * (0.99 / safe_hf) if (1.0 <= safe_hf < 50.0) else collateral_usd
+    _, _, _, _, _, trig_net = _eval(trig_col)
+    net_usd = raw_net if safe_hf < 1.0 else 0.0
+
+    return (
+        round(drop_pct, 2),
+        round(eth_liq_usd, 2),
+        {
+            "close_factor_pct": round(cf * 100.0, 2),
+            "liquidation_bonus_pct": 5.0,
+            "flash_fee_pct": 0.05,
+            "debt_to_cover_usd": round(dtc, 2),
+            "seized_collateral_usd": round(seized, 2),
+            "gross_bounty_usd": round(gross, 2),
+            "flash_loan_fee_usd": round(f_fee, 2),
+            "dex_swap_fee_usd": round(d_fee, 2),
+            "est_gas_usd": round(est_gas_usd, 2),
+            "net_profit_usd": round(net_usd, 2),
+            "trigger_net_profit_usd": round(trig_net, 2),
+            "profitable_now": bool(safe_hf < 1.0 and net_usd > 0.0),
+        },
+    )
+
+
+def _enrich_position_inr(pos: dict[str, object], usd_inr: float) -> dict[str, object]:
+    out = dict(pos)
+    col_usd = float(out.get("collateral_usd") or 0.0)
+    debt_usd = float(out.get("debt_usd") or 0.0)
+    avail_usd = float(out.get("available_borrows_usd") or 0.0)
+    eth_liq_usd = float(out.get("eth_liq_price_usd") or 0.0)
+
+    out["collateral_inr"] = format_usd_as_inr(col_usd, usd_inr)
+    out["debt_inr"] = format_usd_as_inr(debt_usd, usd_inr)
+    out["available_borrows_inr"] = format_usd_as_inr(avail_usd, usd_inr)
+    out["eth_liq_price_inr"] = format_usd_as_inr(eth_liq_usd, usd_inr) if eth_liq_usd > 0 else "—"
+
+    raw_plan = out.get("plan")
+    plan = dict(raw_plan) if isinstance(raw_plan, dict) else {}
+    plan["debt_to_cover_inr"] = format_usd_as_inr(float(plan.get("debt_to_cover_usd") or 0.0), usd_inr)
+    plan["seized_collateral_inr"] = format_usd_as_inr(
+        float(plan.get("seized_collateral_usd") or 0.0), usd_inr
+    )
+    plan["gross_bounty_inr"] = format_usd_as_inr(
+        float(plan.get("gross_bounty_usd") or 0.0), usd_inr, plus=True
+    )
+    plan["flash_loan_fee_inr"] = format_usd_as_inr(
+        float(plan.get("flash_loan_fee_usd") or 0.0), usd_inr
+    )
+    plan["dex_swap_fee_inr"] = format_usd_as_inr(float(plan.get("dex_swap_fee_usd") or 0.0), usd_inr)
+    plan["est_gas_inr"] = format_usd_as_inr(float(plan.get("est_gas_usd") or 0.0), usd_inr)
+    plan["net_profit_inr"] = format_usd_as_inr(
+        float(plan.get("net_profit_usd") or 0.0), usd_inr, plus=True
+    )
+    plan["trigger_net_profit_inr"] = format_usd_as_inr(
+        float(plan.get("trigger_net_profit_usd") or 0.0), usd_inr, plus=True
+    )
+    out["plan"] = plan
+    return out
+
+
+def inspect_aave_v3_wallet(
+    address_raw: str,
+    *,
+    eth_price_usd: float = 2650.0,
+    base_fee_gwei: float = 1.0,
+    usd_inr: float = DEFAULT_USD_INR,
+    timeout: float = 3.5,
+) -> dict[str, object]:
+    cleaned = address_raw.strip()
+    if (
+        len(cleaned) != 42
+        or not cleaned.startswith(("0x", "0X"))
+        or any(ch not in "0123456789abcdefABCDEF" for ch in cleaned[2:])
+    ):
+        return {"ok": False, "error": "Enter a valid 42-character 0x Ethereum address."}
+
+    addr_lc = "0x" + cleaned[2:].lower()
+    call_data = "0xbf92857c" + ("0" * 24) + cleaned[2:].lower()
+    rpc_url = _resolve_http_rpc()
+    req_body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "eth_call",
+            "params": [{"to": AAVE_V3_POOL_HEX, "data": call_data}, "latest"],
+        }
+    ).encode("utf-8")
+    try:
+        req = urllib.request.Request(
+            rpc_url,
+            data=req_body,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "MempoolObservatory/2.0",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - configured Ethereum JSON-RPC
+            rpc_json = json.loads(resp.read().decode("utf-8"))
+        hex_res = str(rpc_json.get("result") or "")
+        if not hex_res.startswith("0x") or len(hex_res) < 2 + 384:
+            return {"ok": False, "user": addr_lc, "error": "Aave V3 Pool returned empty account data."}
+        raw = bytes.fromhex(hex_res[2 : 2 + 384])
+        col_base = int.from_bytes(raw[0:32], "big")
+        debt_base = int.from_bytes(raw[32:64], "big")
+        avail_base = int.from_bytes(raw[64:96], "big")
+        liq_bps = int.from_bytes(raw[96:128], "big")
+        ltv_bps = int.from_bytes(raw[128:160], "big")
+        hf_wad = int.from_bytes(raw[160:192], "big")
+
+        col_usd = round(col_base / 1e8, 2)
+        debt_usd = round(debt_base / 1e8, 2)
+        avail_usd = round(avail_base / 1e8, 2)
+        hf = 99.99 if (debt_base == 0 or hf_wad >= 100 * (10**18)) else round(hf_wad / 1e18, 4)
+        status = (
+            "no_debt"
+            if debt_base == 0
+            else ("liquidatable" if hf < 1.0 else ("critical" if hf < 1.05 else ("at_risk" if hf < 1.20 else "healthy")))
+        )
+        drop_pct, eth_liq_usd, plan = compute_flash_plan_dict(
+            col_usd, debt_usd, hf, eth_price_usd, base_fee_gwei
+        )
+        pos = _enrich_position_inr(
+            {
+                "ok": True,
+                "has_debt": debt_base > 0,
+                "user": addr_lc,
+                "collateral_usd": col_usd,
+                "debt_usd": debt_usd,
+                "available_borrows_usd": avail_usd,
+                "liq_threshold_bps": liq_bps,
+                "liq_threshold_pct": round(liq_bps / 100.0, 2),
+                "ltv_bps": ltv_bps,
+                "ltv_pct": round(ltv_bps / 100.0, 2),
+                "health_factor": hf,
+                "status": status,
+                "price_drop_pct_to_liq": drop_pct,
+                "eth_liq_price_usd": eth_liq_usd,
+                "last_reserve_symbol": "LIVE RPC",
+                "revm_verified": False,
+                "plan": plan,
+            },
+            usd_inr,
+        )
+        return pos
+    except Exception as exc:
+        return {"ok": False, "user": addr_lc, "error": f"RPC query failed: {type(exc).__name__}"}
+
+
+def summarise_liquidations(
+    snapshot: dict[str, object] | None,
+    *,
+    limit: int = 60,
+    filter_name: str = "all",
+    eth_inr: float = DEFAULT_ETH_INR,
+    rate_source: str = "reference",
+    inspected: dict[str, object] | None = None,
+) -> dict[str, object]:
+    snap = snapshot if isinstance(snapshot, dict) else {}
+    resolved_eth_inr = eth_inr if eth_inr > 0 else default_eth_inr()
+    raw_eth_usd = float(snap.get("eth_price_usd") or 0.0)
+    eth_price_usd = raw_eth_usd if raw_eth_usd > 100.0 else round(resolved_eth_inr / DEFAULT_USD_INR, 2)
+    usd_inr = resolve_usd_inr(resolved_eth_inr, eth_price_usd)
+
+    raw_positions = snap.get("positions")
+    pos_list = [p for p in raw_positions if isinstance(p, dict)] if isinstance(raw_positions, list) else []
+
+    enriched_all = [_enrich_position_inr(p, usd_inr) for p in pos_list]
+    enriched_all.sort(key=lambda p: (float(p.get("health_factor") or 99.99), -float(p.get("debt_usd") or 0.0)))
+
+    liquidatable_count = 0
+    critical_count = 0
+    at_risk_count = 0
+    lowest_hf: float | None = None
+    liq_bounty_usd = 0.0
+    liq_net_usd = 0.0
+    at_risk_debt_usd = 0.0
+    total_debt_usd = 0.0
+    total_col_usd = 0.0
+
+    for p in enriched_all:
+        hf = float(p.get("health_factor") or 99.99)
+        d_usd = float(p.get("debt_usd") or 0.0)
+        c_usd = float(p.get("collateral_usd") or 0.0)
+        total_debt_usd += d_usd
+        total_col_usd += c_usd
+        if lowest_hf is None or hf < lowest_hf:
+            lowest_hf = hf
+        plan = p.get("plan") if isinstance(p.get("plan"), dict) else {}
+        if hf < 1.0:
+            liquidatable_count += 1
+            at_risk_count += 1
+            at_risk_debt_usd += d_usd
+            liq_bounty_usd += float(plan.get("gross_bounty_usd") or 0.0)
+            liq_net_usd += max(0.0, float(plan.get("net_profit_usd") or 0.0))
+        elif hf < 1.05:
+            critical_count += 1
+            at_risk_count += 1
+            at_risk_debt_usd += d_usd
+        elif hf < 1.20:
+            at_risk_count += 1
+            at_risk_debt_usd += d_usd
+
+    chosen_filter = filter_name if filter_name in LIQ_FILTERS else "all"
+    if chosen_filter == "liquidatable":
+        filtered = [p for p in enriched_all if float(p.get("health_factor") or 99.99) < 1.0]
+    elif chosen_filter == "at_risk":
+        filtered = [p for p in enriched_all if float(p.get("health_factor") or 99.99) < 1.20]
+    else:
+        filtered = enriched_all
+
+    raw_events = snap.get("recent_liquidations")
+    events_in = [e for e in raw_events if isinstance(e, dict)] if isinstance(raw_events, list) else []
+    enriched_events: list[dict[str, object]] = []
+    for ev in events_in[:40]:
+        ev_copy = dict(ev)
+        d_est = float(ev_copy.get("debt_to_cover_usd_est") or 0.0)
+        ev_copy["debt_to_cover_inr"] = format_usd_as_inr(d_est, usd_inr) if d_est > 0 else "—"
+        enriched_events.append(ev_copy)
+
+    return {
+        "protocol": str(snap.get("protocol") or "Aave V3 · Ethereum Mainnet"),
+        "pool_address": str(snap.get("pool_address") or AAVE_V3_POOL_HEX),
+        "oracle_address": str(snap.get("oracle_address") or AAVE_V3_ORACLE_HEX),
+        "status": str(snap.get("status") or ("empty" if not snapshot else "live")),
+        "head_block": int(snap.get("head_block") or 0),
+        "scanned_from_block": int(snap.get("scanned_from_block") or 0),
+        "scanned_blocks_total": int(snap.get("scanned_blocks_total") or 0),
+        "discovered_borrowers_total": int(snap.get("discovered_borrowers_total") or len(enriched_all)),
+        "base_fee_gwei": float(snap.get("base_fee_gwei") or 1.0),
+        "flashloan_premium_bps": int(snap.get("flashloan_premium_bps") or 5),
+        "default_liq_bonus_bps": int(snap.get("default_liq_bonus_bps") or 500),
+        "updated_ts": str(snap.get("updated_ts") or ""),
+        "filter": chosen_filter,
+        "fx": {
+            "currency": "INR",
+            "eth_inr": round(resolved_eth_inr, 2),
+            "eth_usd": round(eth_price_usd, 2),
+            "usd_inr": round(usd_inr, 4),
+            "eth_inr_formatted": format_inr_paise(int(round(resolved_eth_inr * 100.0))),
+            "source": rate_source,
+        },
+        "summary": {
+            "tracked_count": len(enriched_all),
+            "shown_count": min(limit, len(filtered)),
+            "liquidatable_count": liquidatable_count,
+            "critical_count": critical_count,
+            "at_risk_count": at_risk_count,
+            "lowest_hf": round(lowest_hf, 4) if lowest_hf is not None else None,
+            "total_liquidatable_bounty_usd": round(liq_bounty_usd, 2),
+            "total_liquidatable_bounty_inr": format_usd_as_inr(liq_bounty_usd, usd_inr),
+            "total_liquidatable_net_usd": round(liq_net_usd, 2),
+            "total_liquidatable_net_inr": format_usd_as_inr(liq_net_usd, usd_inr, plus=(liq_net_usd > 0)),
+            "at_risk_debt_usd": round(at_risk_debt_usd, 2),
+            "at_risk_debt_inr": format_usd_as_inr(at_risk_debt_usd, usd_inr),
+            "total_tracked_debt_usd": round(total_debt_usd, 2),
+            "total_tracked_debt_inr": format_usd_as_inr(total_debt_usd, usd_inr),
+            "total_tracked_collateral_usd": round(total_col_usd, 2),
+            "total_tracked_collateral_inr": format_usd_as_inr(total_col_usd, usd_inr),
+        },
+        "positions": filtered[:limit],
+        "recent_liquidations": enriched_events,
+        "inspected": inspected,
+    }
+
+
 def bounded_limit(raw: object, default: int) -> int:
     try:
         requested = int(str(raw))
@@ -631,6 +990,8 @@ class HitsHandler(BaseHTTPRequestHandler):
             self._serve_hits(parse_qs(parsed.query))
         elif parsed.path == "/quality":
             self._serve_quality(parse_qs(parsed.query))
+        elif parsed.path == "/liquidations":
+            self._serve_liquidations(parse_qs(parsed.query))
         else:
             self.send_error(404)
 
@@ -667,6 +1028,40 @@ class HitsHandler(BaseHTTPRequestHandler):
             rate_source=rate_source,
         )
         payload = json.dumps(summary, separators=(",", ":")).encode("utf-8")
+        self._send_json(payload)
+
+    def _serve_liquidations(self, query: dict[str, list[str]]) -> None:
+        limit = bounded_limit(query.get("limit", ["60"])[0], 60)
+        filter_name = query.get("filter", ["all"])[0]
+        if filter_name not in LIQ_FILTERS:
+            filter_name = "all"
+        inspect_addr = query.get("inspect", [""])[0].strip()
+
+        snapshot = _read_liquidation_snapshot()
+        eth_inr, rate_source = get_live_eth_inr()
+        raw_eth_usd = float((snapshot or {}).get("eth_price_usd") or 0.0)
+        eth_usd = raw_eth_usd if raw_eth_usd > 100.0 else round(eth_inr / DEFAULT_USD_INR, 2)
+        base_fee_gwei = float((snapshot or {}).get("base_fee_gwei") or 1.0)
+        usd_inr = resolve_usd_inr(eth_inr, eth_usd)
+
+        inspected = None
+        if inspect_addr:
+            inspected = inspect_aave_v3_wallet(
+                inspect_addr,
+                eth_price_usd=eth_usd,
+                base_fee_gwei=base_fee_gwei,
+                usd_inr=usd_inr,
+            )
+
+        res = summarise_liquidations(
+            snapshot,
+            limit=limit,
+            filter_name=filter_name,
+            eth_inr=eth_inr,
+            rate_source=rate_source,
+            inspected=inspected,
+        )
+        payload = json.dumps(res, separators=(",", ":")).encode("utf-8")
         self._send_json(payload)
 
     def _send_json(self, payload: bytes) -> None:

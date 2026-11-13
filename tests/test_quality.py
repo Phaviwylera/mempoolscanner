@@ -453,5 +453,85 @@ class PipelineSummaryTests(unittest.TestCase):
         self.assertEqual(bar["recent_tx_value_inr"], "₹1,56,000.00")
 
 
+class LiquidationSummaryTests(unittest.TestCase):
+    def test_aave_v3_flash_liquidation_math_and_inr_summary(self) -> None:
+        drop_safe, trig_eth, safe_plan = hits_api.compute_flash_plan_dict(
+            10000.0, 6000.0, 8000.0 / 6000.0, 2000.0, base_fee_gwei=1.0, close_factor=0.50
+        )
+        self.assertEqual(drop_safe, 25.0)
+        self.assertEqual(trig_eth, 1500.0)
+        self.assertFalse(safe_plan["profitable_now"])
+
+        drop_liq, _, liq_plan = hits_api.compute_flash_plan_dict(
+            7000.0, 6000.0, 5600.0 / 6000.0, 1400.0, base_fee_gwei=1.0, close_factor=0.50
+        )
+        self.assertEqual(drop_liq, 0.0)
+        self.assertEqual(liq_plan["debt_to_cover_usd"], 3000.0)
+        self.assertEqual(liq_plan["seized_collateral_usd"], 3150.0)
+        self.assertEqual(liq_plan["gross_bounty_usd"], 150.0)
+        self.assertEqual(liq_plan["flash_loan_fee_usd"], 1.5)
+        self.assertTrue(liq_plan["profitable_now"])
+
+        snapshot = {
+            "status": "live",
+            "head_block": 21200000,
+            "scanned_from_block": 21194000,
+            "scanned_blocks_total": 6001,
+            "discovered_borrowers_total": 42,
+            "eth_price_usd": 2000.0,
+            "base_fee_gwei": 1.0,
+            "positions": [
+                {
+                    "user": "0x1111111111111111111111111111111111111111",
+                    "collateral_usd": 7000.0,
+                    "debt_usd": 6000.0,
+                    "available_borrows_usd": 0.0,
+                    "liq_threshold_pct": 80.0,
+                    "ltv_pct": 75.0,
+                    "health_factor": 0.9333,
+                    "status": "liquidatable",
+                    "price_drop_pct_to_liq": 0.0,
+                    "eth_liq_price_usd": 1500.0,
+                    "plan": liq_plan,
+                },
+                {
+                    "user": "0x2222222222222222222222222222222222222222",
+                    "collateral_usd": 20000.0,
+                    "debt_usd": 15000.0,
+                    "available_borrows_usd": 500.0,
+                    "liq_threshold_pct": 81.0,
+                    "ltv_pct": 78.0,
+                    "health_factor": 1.08,
+                    "status": "at_risk",
+                    "price_drop_pct_to_liq": 7.41,
+                    "eth_liq_price_usd": 1851.85,
+                    "plan": safe_plan,
+                },
+            ],
+            "recent_liquidations": [],
+        }
+
+        # eth_inr = 170,000 and eth_price_usd = 2,000 => usd_inr = 85.0
+        res = hits_api.summarise_liquidations(snapshot, eth_inr=170000.0, rate_source="coinbase")
+        self.assertEqual(res["fx"]["usd_inr"], 85.0)
+        self.assertEqual(res["summary"]["tracked_count"], 2)
+        self.assertEqual(res["summary"]["liquidatable_count"], 1)
+        self.assertEqual(res["summary"]["at_risk_count"], 2)
+        self.assertEqual(res["summary"]["lowest_hf"], 0.9333)
+        # $150 gross bounty * 85 INR/USD = ₹12,750.00
+        self.assertEqual(res["summary"]["total_liquidatable_bounty_inr"], "₹12,750.00")
+
+        only_liq = hits_api.summarise_liquidations(
+            snapshot, filter_name="liquidatable", eth_inr=170000.0
+        )
+        self.assertEqual(len(only_liq["positions"]), 1)
+        self.assertEqual(only_liq["positions"][0]["user"], "0x1111111111111111111111111111111111111111")
+
+    def test_inspect_wallet_rejects_invalid_hex_cleanly(self) -> None:
+        bad = hits_api.inspect_aave_v3_wallet("not-a-valid-address")
+        self.assertFalse(bad["ok"])
+        self.assertIn("error", bad)
+
+
 if __name__ == "__main__":
     unittest.main()
