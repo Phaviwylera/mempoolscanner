@@ -1,0 +1,25 @@
+[Unit]
+Description=Read-only mempool scanner
+After=network-online.target mempolscan-anvil.service
+Requires=mempolscan-anvil.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mempolscan
+Group=mempolscan
+WorkingDirectory=/opt/mempoolscanner
+EnvironmentFile=/opt/mempoolscanner/.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/mempoolscanner/venv/bin/python /opt/mempoolscanner/mempool_scanner.py
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/mempoolscanner/logs
+
+[Install]
+WantedBy=multi-user.target
+
