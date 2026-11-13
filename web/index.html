@@ -23,7 +23,7 @@
         </nav>
         <div class="top-status">
           <span class="chain-chip"><span class="eth-diamond">◆</span> ETHEREUM MAINNET</span>
-          <span id="feed-status" class="feed-status"><i></i><b>CONNECTING</b></span>
+          <span id="feed-status" class="feed-status"><i></i><b>API CONNECTING</b></span>
           <button id="refresh-button" class="icon-button" type="button" aria-label="Refresh observations" title="Refresh observations">↻</button>
         </div>
       </header>
@@ -47,7 +47,7 @@
 
         <section class="workspace-grid">
           <article class="panel field-panel">
-            <div class="panel-head"><div><div class="panel-kicker">SIGNAL / 01</div><h2>Observation field</h2></div><div class="panel-meta"><span class="live-tag"><i></i> STREAMING</span><span>MAINNET</span></div></div>
+            <div class="panel-head"><div><div class="panel-kicker">SIGNAL / 01</div><h2>Observation field</h2></div><div class="panel-meta"><span class="live-tag"><i></i> POLLING</span><span>MAINNET</span></div></div>
             <div class="field-stage">
               <canvas id="field-canvas" aria-label="Abstract animated visualization of the observation field"></canvas>
               <div class="field-grid"></div>
@@ -67,11 +67,11 @@
           <aside class="side-stack">
             <article class="panel status-panel">
               <div class="panel-head compact"><div><div class="panel-kicker">SYSTEM / 02</div><h2>Observer status</h2></div><span class="status-emblem">◉</span></div>
-              <div class="status-line"><span class="status-symbol good">↗</span><div><b>Pending feed</b><small id="feed-detail">Waiting for API response</small></div><span id="feed-pill" class="state-pill waiting">CHECKING</span></div>
-              <div class="status-line"><span class="status-symbol violet">⌁</span><div><b>Fork simulation</b><small>Local Anvil · eth_call only</small></div><span class="state-pill ready">READY</span></div>
+              <div class="status-line"><span class="status-symbol good">↗</span><div><b>Read-only feed API</b><small id="feed-detail">Waiting for API response</small></div><span id="feed-pill" class="state-pill waiting">CHECKING</span></div>
+              <div class="status-line"><span class="status-symbol violet">⌁</span><div><b>Simulation target</b><small>Local Anvil · eth_call only</small></div><span class="state-pill ready">LOCAL ONLY</span></div>
               <div class="status-divider"></div>
               <div class="watch-heading"><span>SELECTOR WATCH</span><b>25 <small>signatures</small></b></div>
-              <div class="watch-bars" aria-label="Selector categories"><div><span>CLAIM / WITHDRAW</span><i><b style="width:32%"></b></i><em>08</em></div><div><span>UNISWAP V2 / V3</span><i><b style="width:64%"></b></i><em>16</em></div><div><span>LIQUIDATION</span><i><b style="width:18%"></b></i><em>02</em></div></div>
+              <div class="watch-bars" aria-label="Selector categories"><div><span>CLAIM / WITHDRAW</span><i><b class="bar-32"></b></i><em>08</em></div><div><span>UNISWAP V2 / V3</span><i><b class="bar-64"></b></i><em>16</em></div><div><span>LIQUIDATION</span><i><b class="bar-18"></b></i><em>02</em></div></div>
               <p class="tiny-note">Selector list is configured in the scanner.</p>
             </article>
 
