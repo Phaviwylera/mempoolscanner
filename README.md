@@ -26,7 +26,7 @@ Install Foundry and start an Ethereum mainnet fork in a separate terminal:
 ```bash
 curl -L https://foundry.paradigm.xyz | bash && foundryup
 set -a; source .env; set +a
-anvil --fork-url "$HTTP_RPC" --fork-block-number latest --port 8545
+anvil --fork-url "$HTTP_RPC" (Anvil defaults to the latest block) --port 8545
 ```
 
 Start the monitor from the repository directory:
