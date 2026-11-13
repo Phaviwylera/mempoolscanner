@@ -38,6 +38,28 @@ const INR_FORMATTER = new Intl.NumberFormat("en-IN", {
   maximumFractionDigits: 2,
 });
 
+const INR_FORMATTER_4 = new Intl.NumberFormat("en-IN", {
+  minimumFractionDigits: 4,
+  maximumFractionDigits: 4,
+});
+
+function parsePositiveWei(rawVal) {
+  try {
+    const s = String(rawVal ?? "0").trim();
+    if (!s || s === "0" || s.startsWith("-")) return 0n;
+    const w = BigInt(s);
+    return w > 0n ? w : 0n;
+  } catch {
+    return 0n;
+  }
+}
+
+function rowEffectiveWei(hit) {
+  const txVal = parsePositiveWei(hit?.value);
+  const grossVal = parsePositiveWei(hit?.decision?.gross_value_wei);
+  return grossVal > txVal ? grossVal : txVal;
+}
+
 function formatInrFromWei(weiStr, ethInr = currentEthInr(), { plus = false } = {}) {
   try {
     const raw = String(weiStr ?? "0").trim();
@@ -46,10 +68,16 @@ function formatInrFromWei(weiStr, ethInr = currentEthInr(), { plus = false } = {
     const clean = neg ? raw.slice(1) : raw;
     const wei = BigInt(clean || "0");
     if (wei === 0n) return "₹0.00";
-    const ratePaise = BigInt(Math.max(1, Math.round(Number(ethInr || DEFAULT_ETH_INR) * 100)));
-    const paise = (wei * ratePaise) / (10n ** 18n);
-    const rupees = Number(paise) / 100;
-    const sign = neg ? "-" : (plus && paise > 0n ? "+" : "");
+    const rateScaled = BigInt(Math.max(1, Math.round(Number(ethInr || DEFAULT_ETH_INR) * 10000)));
+    const microRupees = (wei * rateScaled) / (10n ** 18n);
+    const sign = neg ? "-" : (plus ? "+" : "");
+    if (microRupees === 0n) {
+      return `${sign}< ₹0.01`;
+    }
+    const rupees = Number(microRupees) / 10000;
+    if (rupees < 0.01) {
+      return `${sign}₹${INR_FORMATTER_4.format(rupees)}`;
+    }
     return `${sign}₹${INR_FORMATTER.format(rupees)}`;
   } catch {
     return "₹0.00";
@@ -67,6 +95,12 @@ function labelKind(label = "") {
 
 function decisionStatus(hit) {
   const st = hit && hit.decision && hit.decision.status ? String(hit.decision.status) : "not_applicable";
+  if (st === "extractable") {
+    const g = parsePositiveWei(hit?.decision?.gross_value_wei);
+    const n = parsePositiveWei(hit?.decision?.net_profit_wei);
+    if (g <= 0n && n <= 0n) return "not_applicable";
+    return "extractable";
+  }
   return Object.prototype.hasOwnProperty.call(PROBE_TEXT, st) ? st : "not_applicable";
 }
 
@@ -422,7 +456,7 @@ function renderTable() {
     row.append(
       makeCell(shortAddress(hit.from), "address"),
       makeCell(shortAddress(hit.to), "address"),
-      makeCell(formatInrFromWei(hit.value)),
+      makeCell(formatInrFromWei(rowEffectiveWei(hit).toString())),
       makeCell(gasDisplayed.toLocaleString()),
     );
 
@@ -482,32 +516,35 @@ function renderExtractableBar() {
   const qExt = state.quality && state.quality.extractable ? state.quality.extractable : null;
   const ethInr = currentEthInr();
   const fxSrc = String(state.quality?.fx?.source || state.fxSource || "reference");
-  const openHits = state.hits.filter((h) => !h.closed && decisionStatus(h) === "extractable");
+  const activeHits = state.hits.filter((h) => !h.closed);
+  const openHits = activeHits.filter((h) => decisionStatus(h) === "extractable");
 
   let openCount = openHits.length;
   let grossWei = 0n;
   let netWei = 0n;
+  let recentFeedWei = 0n;
   let tokenGains = 0;
 
+  for (const h of activeHits) {
+    recentFeedWei += rowEffectiveWei(h);
+  }
+
   for (const h of openHits) {
-    try {
-      const g = BigInt(String(h.decision?.gross_value_wei ?? "0").trim() || "0");
-      if (g > 0n) grossWei += g;
-    } catch {}
-    try {
-      const nRaw = String(h.decision?.net_profit_wei ?? "0").trim();
-      if (!nRaw.startsWith("-")) {
-        const n = BigInt(nRaw || "0");
-        if (n > 0n) netWei += n;
-      }
-    } catch {}
+    const g = parsePositiveWei(h.decision?.gross_value_wei);
+    const n = parsePositiveWei(h.decision?.net_profit_wei);
+    const effGross = g > 0n ? g : n;
+    if (effGross > 0n) grossWei += effGross;
+    if (n > 0n) netWei += n;
     tokenGains += Number(h.decision?.probe_token_gains || 0);
   }
 
-  if (qExt && Number(qExt.open_count) >= 0 && state.hits.length === 0) {
+  let activeCount = activeHits.length;
+  if (qExt && activeHits.length === 0) {
     openCount = Number(qExt.open_count) || 0;
-    try { grossWei = BigInt(qExt.total_gross_wei || "0"); } catch {}
-    try { netWei = BigInt(qExt.total_net_wei || "0"); } catch {}
+    activeCount = Number(qExt.active_tx_count) || 0;
+    grossWei = parsePositiveWei(qExt.total_gross_wei);
+    netWei = parsePositiveWei(qExt.total_net_wei);
+    recentFeedWei = parsePositiveWei(qExt.recent_tx_value_wei);
     tokenGains = Number(qExt.token_transfers || 0);
   }
 
@@ -523,6 +560,15 @@ function renderExtractableBar() {
   $("#ext-bar-net").textContent = netWei > 0n
     ? formatInrFromWei(netWei.toString(), ethInr, { plus: true })
     : "₹0.00";
+
+  const feedValEl = $("#ext-bar-feed-val");
+  if (feedValEl) {
+    feedValEl.textContent = formatInrFromWei(recentFeedWei.toString(), ethInr);
+  }
+  const feedSubEl = $("#ext-bar-feed-sub");
+  if (feedSubEl) {
+    feedSubEl.textContent = `${activeCount.toLocaleString()} ACTIVE CALL${activeCount === 1 ? "" : "S"}`;
+  }
 
   const tokenNote = $("#ext-bar-tokens");
   if (openCount === 0) {

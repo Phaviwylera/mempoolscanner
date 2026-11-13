@@ -413,6 +413,45 @@ class PipelineSummaryTests(unittest.TestCase):
         self.assertEqual(empty_res["extractable"]["total_gross_inr"], "₹0.00")
         self.assertEqual(empty_res["extractable"]["total_net_inr"], "₹0.00")
 
+    def test_zero_value_legacy_extractable_is_excluded_and_recent_value_sums(self) -> None:
+        records = [
+            {
+                "name": "universal_router_execute",
+                "hash": "0xdead",
+                "value": "100000000000000000",  # 0.1 ETH = ₹26,000.00
+                "decision": {
+                    "status": "extractable",
+                    "would_frontrun": True,
+                    "gross_value_wei": "0",
+                    "net_profit_wei": "0",
+                    "probe_token_gains": 1,
+                },
+                "label": "candidate:universal_router_execute",
+            },
+            {
+                "name": "claim",
+                "hash": "0xbeef",
+                "value": "0",
+                "decision": {
+                    "status": "extractable",
+                    "would_frontrun": True,
+                    "gross_value_wei": "500000000000000000",  # 0.5 ETH = ₹1,30,000.00
+                    "net_profit_wei": "45000000000000000",  # 0.045 ETH = +₹11,700.00
+                    "probe_token_gains": 0,
+                },
+                "label": "candidate:claim",
+            },
+        ]
+        res = hits_api.summarise_quality(
+            records, max_lag=MAX_LAG, poll_seconds=POLL_SECONDS, now=NOW, eth_inr=260000.0
+        )
+        bar = res["extractable"]
+        self.assertEqual(bar["open_count"], 1)
+        self.assertEqual(bar["total_gross_inr"], "₹1,30,000.00")
+        self.assertEqual(bar["total_net_inr"], "+₹11,700.00")
+        self.assertEqual(bar["active_tx_count"], 2)
+        self.assertEqual(bar["recent_tx_value_inr"], "₹1,56,000.00")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -991,22 +991,6 @@ pub fn rewrite_recipient_calldata(
             c.receiver = probe;
             c.abi_encode()
         }
-        "uniswap_v2_swap_exact_eth_for_tokens" => {
-            let mut c = defs::v2_swaps::swapExactETHForTokensCall::abi_decode(data).ok()?;
-            if c.to == probe {
-                return None;
-            }
-            c.to = probe;
-            c.abi_encode()
-        }
-        "uniswap_v2_swap_eth_for_exact_tokens" => {
-            let mut c = defs::v2_swaps::swapETHForExactTokensCall::abi_decode(data).ok()?;
-            if c.to == probe {
-                return None;
-            }
-            c.to = probe;
-            c.abi_encode()
-        }
         "uniswap_v3_pool_swap" => {
             let mut c = defs::v3_pool::swapCall::abi_decode(data).ok()?;
             if c.recipient == probe {
