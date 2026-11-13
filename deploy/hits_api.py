@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Loopback-only, read-only view of the scanner's recent JSONL observations."""
+"""Loopback-only, read-only view of the Rust Revm scanner's JSONL observations."""
 
 from __future__ import annotations
 
@@ -11,13 +11,22 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-LOG_PATH = Path("/opt/mempoolscanner/logs/hits.jsonl")
+
+def _default_log_path() -> Path:
+    override = os.getenv("MEMPOLSCAN_LOG_PATH", "").strip() or os.getenv("LOG_PATH", "").strip()
+    if override:
+        return Path(override)
+    prod = Path("/opt/mempoolscanner/logs/hits.jsonl")
+    if prod.parent.exists():
+        return prod
+    return Path("logs/hits.jsonl")
+
+
+LOG_PATH = _default_log_path()
 HOST = "127.0.0.1"
 PORT = 8765
 MAX_LIMIT = 100
 
-# Fork-quality reporting. The defaults mirror mempool_scanner.load_settings();
-# the service reads the same FORK_* variables from the scanner's .env file.
 FORK_MAX_LAG_DEFAULT = 3
 FORK_POLL_SECONDS_DEFAULT = 3.0
 BANNER_WINDOW = 50
@@ -25,7 +34,8 @@ STALE_RED_SHARE = 0.2
 STALL_MULTIPLIER = 5
 
 QUALITY_KINDS = ("candidate", "state_dependent", "sim_failed", "no_code", "stale_fork", "other")
-HIT_FILTERS = ("all", "ok", "failed")
+FRONTRUN_STATUSES = ("extractable", "beneficiary_locked", "sender_protected", "not_applicable")
+HIT_FILTERS = ("all", "ok", "failed", "extractable")
 
 
 def _env_int(name: str, default: int, minimum: int = 0) -> int:
@@ -77,6 +87,15 @@ def sim_ok(record: dict[str, object]) -> bool:
     return bool(sim.get("ok")) if isinstance(sim, dict) else False
 
 
+def decision_status(record: dict[str, object]) -> str:
+    decision = record.get("decision")
+    if isinstance(decision, dict):
+        status = str(decision.get("status", "")).strip()
+        if status in FRONTRUN_STATUSES:
+            return status
+    return "not_applicable"
+
+
 def as_int(value: object) -> int | None:
     """Coerce a JSONL value to int, tolerating strings and nulls."""
     if isinstance(value, bool):
@@ -125,6 +144,8 @@ def matches_filter(record: dict[str, object], filter_name: str) -> bool:
         return sim_ok(record)
     if filter_name == "failed":
         return not sim_ok(record)
+    if filter_name == "extractable":
+        return decision_status(record) == "extractable"
     return True
 
 
@@ -241,6 +262,63 @@ def summarise_rollup(records: list[dict[str, object]]) -> dict[str, object]:
     }
 
 
+def summarise_pipeline(records: list[dict[str, object]]) -> dict[str, object]:
+    """Summarise 5-stage Rust Alloy + Revm telemetry, ABI categories, and front-run scoring."""
+    fr_counts = {status: 0 for status in FRONTRUN_STATUSES}
+    categories = {"claim": 0, "withdraw": 0, "swap": 0, "liquidate": 0}
+    would_frontrun = 0
+    with_decision = 0
+
+    ingest_us: list[int] = []
+    decode_us: list[int] = []
+    sim_us: list[int] = []
+    probe_us: list[int] = []
+    total_us: list[int] = []
+
+    for record in records:
+        decision = record.get("decision")
+        if isinstance(decision, dict) and decision:
+            with_decision += 1
+            st = decision_status(record)
+            fr_counts[st] += 1
+            if bool(decision.get("would_frontrun")):
+                would_frontrun += 1
+
+        decoded = record.get("decoded")
+        if isinstance(decoded, dict):
+            cat = str(decoded.get("category", "")).strip()
+            if cat in categories:
+                categories[cat] += 1
+
+        telemetry = record.get("telemetry")
+        if isinstance(telemetry, dict):
+            for bucket, key in (
+                (ingest_us, "ingest_us"),
+                (decode_us, "decode_us"),
+                (sim_us, "sim_us"),
+                (probe_us, "probe_us"),
+                (total_us, "total_us"),
+            ):
+                val = as_int(telemetry.get(key))
+                if val is not None:
+                    bucket.append(val)
+
+    return {
+        "engine": "rust-alloy-revm",
+        "with_decision": with_decision,
+        "would_frontrun": would_frontrun,
+        "frontrun_counts": fr_counts,
+        "categories": categories,
+        "latency_us": {
+            "median_ingest": median(ingest_us),
+            "median_decode": median(decode_us),
+            "median_sim": median(sim_us),
+            "median_probe": median(probe_us),
+            "median_total": median(total_us),
+        },
+    }
+
+
 def summarise_quality(
     records: list[dict[str, object]],
     *,
@@ -251,7 +329,7 @@ def summarise_quality(
     now: float | None = None,
     banner_window: int = BANNER_WINDOW,
 ) -> dict[str, object]:
-    """Summarise fork quality for the banner and the current filter window."""
+    """Summarise fork quality and Revm 5-stage pipeline telemetry."""
     ordered = [record for record in records if isinstance(record, dict)]
     resolved_filter = filter_name if filter_name in HIT_FILTERS else "all"
     filtered = [record for record in ordered if matches_filter(record, resolved_filter)]
@@ -275,6 +353,7 @@ def summarise_quality(
             window=banner_window,
         ),
         "rollup": summarise_rollup(filtered),
+        "pipeline": summarise_pipeline(filtered),
     }
 
 
@@ -287,7 +366,7 @@ def bounded_limit(raw: object, default: int) -> int:
 
 
 class HitsHandler(BaseHTTPRequestHandler):
-    server_version = "MempoolReadOnlyAPI/1.1"
+    server_version = "MempoolReadOnlyAPI/2.0"
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
         parsed = urlparse(self.path)
@@ -355,23 +434,26 @@ class HitsHandler(BaseHTTPRequestHandler):
                 continue
             if not isinstance(record, dict):
                 continue
-            # Whitelist only the fields used by the read-only dashboard.
-            hits.append(
-                {
-                    "name": str(record.get("name", ""))[:96],
-                    "hash": str(record.get("hash", ""))[:80],
-                    "from": str(record.get("from", ""))[:80],
-                    "to": str(record.get("to", ""))[:80],
-                    "value": str(record.get("value", "0")),
-                    "selector": str(record.get("selector", ""))[:16],
-                    "gas": str(record.get("gas", "0")),
-                    "tip": str(record.get("tip", "")),
-                    "ts": str(record.get("ts", ""))[:48],
-                    "fork": record.get("fork", {}) if isinstance(record.get("fork"), dict) else {},
-                    "sim": record.get("sim", {}) if isinstance(record.get("sim"), dict) else {},
-                    "label": str(record.get("label", ""))[:240],
-                }
-            )
+            tip_raw = record.get("tip")
+            entry: dict[str, object] = {
+                "name": str(record.get("name", ""))[:96],
+                "hash": str(record.get("hash", ""))[:80],
+                "from": str(record.get("from", ""))[:80],
+                "to": str(record.get("to", ""))[:80],
+                "value": str(record.get("value", "0")),
+                "selector": str(record.get("selector", ""))[:16],
+                "gas": str(record.get("gas", "0")),
+                "tip": "" if tip_raw is None else str(tip_raw),
+                "ts": str(record.get("ts", ""))[:48],
+                "fork": record.get("fork", {}) if isinstance(record.get("fork"), dict) else {},
+                "sim": record.get("sim", {}) if isinstance(record.get("sim"), dict) else {},
+                "label": str(record.get("label", ""))[:240],
+            }
+            for extra in ("decoded", "decision", "telemetry"):
+                sub = record.get(extra)
+                if isinstance(sub, dict) and sub:
+                    entry[extra] = sub
+            hits.append(entry)
         hits.reverse()
         return hits
 

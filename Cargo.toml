@@ -1,0 +1,59 @@
+[package]
+name = "mempool-scanner"
+version = "2.0.0"
+edition = "2021"
+description = "Read-only Ethereum mempool observer with Alloy ABI decoding, in-process Revm simulation, and generalized front-runnability scoring."
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "mempool_scanner"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mempool-scanner"
+path = "src/main.rs"
+
+[dependencies]
+alloy = { version = "2.5", default-features = false, features = [
+    "std",
+    "reqwest",
+    "reqwest-rustls-tls",
+    "sol-types",
+    "json",
+    "rpc-types",
+    "providers",
+    "provider-http",
+    "provider-ws-ring",
+    "provider-ipc",
+    "pubsub",
+    "consensus",
+    "eips",
+    "network",
+] }
+revm = { version = "43.0", default-features = false, features = [
+    "std",
+    "portable",
+    "alloydb",
+    "asyncdb",
+    "optional_balance_check",
+    "optional_block_gas_limit",
+    "optional_eip3607",
+    "optional_no_base_fee",
+    "optional_fee_charge",
+] }
+tokio = { version = "1.40", features = ["full"] }
+futures-util = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+dotenvy = "0.15"
+anyhow = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+hex = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

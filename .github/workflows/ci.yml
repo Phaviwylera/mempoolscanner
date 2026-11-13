@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches-ignore:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Run Python API unit tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Configure Rust & musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools pkg-config
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Run Rust unit & Revm integration tests
+        shell: bash
+        run: |
+          set -o pipefail
+          if ! cargo test --all-targets 2>&1 | tee /tmp/cargo-test.log; then
+            python3 -c 'import pathlib; ls=pathlib.Path("/tmp/cargo-test.log").read_text(errors="replace").splitlines(); [print("::error::"+" | ".join(x.strip() for x in ls[i:i+4] if x.strip())[:400]) for i,l in enumerate(ls) if l.startswith("error") or "panicked at" in l or "FAILED" in l][:25]'
+            exit 1
+          fi
+
+      - name: Build static Linux release binary
+        shell: bash
+        run: |
+          set -o pipefail
+          if ! cargo build --release --target x86_64-unknown-linux-musl 2>&1 | tee /tmp/cargo-build.log; then
+            grep -E "^error" /tmp/cargo-build.log | head -n 25 | while IFS= read -r line; do
+              echo "::error::${line}"
+            done
+            exit 1
+          fi
+          ./target/x86_64-unknown-linux-musl/release/mempool-scanner --version
+          ./target/x86_64-unknown-linux-musl/release/mempool-scanner --dump-selectors | head -n 20

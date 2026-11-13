@@ -250,5 +250,61 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(hits_api.bounded_limit("junk", 50), 50)
 
 
+class PipelineSummaryTests(unittest.TestCase):
+    def test_rust_revm_pipeline_telemetry_and_extractable_filter(self) -> None:
+        records = [
+            {
+                "name": "claim",
+                "hash": "0xaa",
+                "from": "0x11",
+                "to": "0x22",
+                "value": "0",
+                "selector": "0x4e71d92d",
+                "gas": 120000,
+                "tip": 1000000000,
+                "ts": "2026-11-13T12:00:00.000Z",
+                "fork": {"block": 100, "head": 100, "lag": 0, "code_present": True, "checked": [100, 99]},
+                "sim": {"ok": True, "engine": "revm", "gas_used": 44000, "result_or_error": "0x"},
+                "decoded": {"signature": "claim()", "category": "claim", "decode_ok": True, "summary": "claim()"},
+                "decision": {"status": "extractable", "would_frontrun": True, "net_profit_wei": "90000000000000000"},
+                "telemetry": {"ingest_us": 100, "decode_us": 6, "sim_us": 420, "probe_us": 180, "total_us": 706},
+                "label": "candidate:claim",
+            },
+            {
+                "name": "claim_merkle_indexed",
+                "hash": "0xbb",
+                "from": "0x33",
+                "to": "0x44",
+                "value": "0",
+                "selector": "0x2e7ba6ef",
+                "gas": 150000,
+                "tip": 1000000000,
+                "ts": "2026-11-13T12:00:01.000Z",
+                "fork": {"block": 100, "head": 100, "lag": 0, "code_present": True, "checked": [100, 99]},
+                "sim": {"ok": True, "engine": "revm", "gas_used": 62000, "result_or_error": "0x"},
+                "decoded": {"signature": "claim(uint256,address,uint256,bytes32[])", "category": "claim", "decode_ok": True, "summary": "claim(...)"},
+                "decision": {"status": "beneficiary_locked", "would_frontrun": False, "net_profit_wei": "0"},
+                "telemetry": {"ingest_us": 80, "decode_us": 10, "sim_us": 500, "probe_us": 200, "total_us": 790},
+                "label": "candidate:claim_merkle_indexed",
+            },
+        ]
+        res = hits_api.summarise_quality(
+            records, filter_name="all", max_lag=MAX_LAG, poll_seconds=POLL_SECONDS, now=NOW
+        )
+        pipe = res["pipeline"]
+        self.assertEqual(pipe["engine"], "rust-alloy-revm")
+        self.assertEqual(pipe["would_frontrun"], 1)
+        self.assertEqual(pipe["frontrun_counts"]["extractable"], 1)
+        self.assertEqual(pipe["frontrun_counts"]["beneficiary_locked"], 1)
+        self.assertEqual(pipe["categories"]["claim"], 2)
+        self.assertEqual(pipe["latency_us"]["median_sim"], 460.0)
+
+        ext_only = hits_api.summarise_quality(
+            records, filter_name="extractable", max_lag=MAX_LAG, poll_seconds=POLL_SECONDS, now=NOW
+        )
+        self.assertEqual(ext_only["window"]["filtered"], 1)
+        self.assertEqual(ext_only["pipeline"]["frontrun_counts"]["extractable"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

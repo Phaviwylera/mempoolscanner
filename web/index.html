@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#07080d" />
-    <meta name="description" content="Read-only Ethereum mempool observations and local-fork call simulations." />
-    <title>Mempool Observatory</title>
+    <meta name="description" content="Read-only Ethereum mempool observer powered by Rust, Alloy ABI decoding, and in-process Revm simulation." />
+    <title>Mempool Observatory · Rust + Revm</title>
     <link rel="stylesheet" href="/styles.css" />
     <script src="/app.js" defer></script>
   </head>
@@ -14,15 +14,16 @@
       <header class="topbar">
         <a class="brand" href="#top" aria-label="Mempool Observatory home">
           <span class="brand-mark"><i></i><i></i><i></i></span>
-          <span class="brand-copy"><strong>MEMPOOL</strong><small>OBSERVATORY / 01</small></span>
+          <span class="brand-copy"><strong>MEMPOOL</strong><small>RUST · ALLOY · REVM / 02</small></span>
         </a>
         <nav class="main-nav" aria-label="Main navigation">
           <a class="active" href="#overview">Overview <span>01</span></a>
           <a href="#activity">Activity <span>02</span></a>
-          <a href="#method">Method <span>03</span></a>
+          <a href="#fork">Evidence <span>03</span></a>
+          <a href="#method">Pipeline <span>04</span></a>
         </nav>
         <div class="top-status">
-          <span class="chain-chip"><span class="eth-diamond">◆</span> ETHEREUM MAINNET</span>
+          <span class="chain-chip"><span class="eth-diamond">◆</span> ETHEREUM · REVM IN-PROCESS</span>
           <span id="feed-status" class="feed-status"><i></i><b>API CONNECTING</b></span>
           <button id="refresh-button" class="icon-button" type="button" aria-label="Refresh observations" title="Refresh observations">↻</button>
         </div>
@@ -38,48 +39,52 @@
 
         <section id="overview" class="intro">
           <div>
-            <div class="eyebrow"><span class="eyebrow-line"></span> LIVE TRANSACTION OBSERVATION <span class="eyebrow-index">FIELD NOTE 001 / 2026</span></div>
-            <h1>Pending calls,<br /><em>under the lens.</em></h1>
-            <p class="intro-copy">A read-only view of selected pending calls, replayed against a local fork.<br class="desktop-break" /> Observe the signal. Keep every action off-chain.</p>
+            <div class="eyebrow"><span class="eyebrow-line"></span> RUST · ALLOY ABI · IN-PROCESS REVM <span class="eyebrow-index">ENGINE v2.0 / 2026</span></div>
+            <h1>Pending calls,<br /><em>simulated in-memory.</em></h1>
+            <p class="intro-copy">A read-only Rust observer that decodes DeFi calldata with Alloy, replays execution inside Revm,<br class="desktop-break" /> and probes caller/recipient substitution &amp; net profit — without signing or broadcasting.</p>
           </div>
-          <div class="intro-badge"><span class="badge-orbit"><i></i></span><div><b>OBSERVATION MODE</b><small>NO SIGNING · NO BROADCAST</small></div></div>
+          <div class="intro-badge"><span class="badge-orbit"><i></i></span><div><b>OBSERVATION MODE</b><small>NO SIGNING · NO BUNDLE BROADCAST</small></div></div>
         </section>
 
         <section class="metric-row" aria-label="Live metrics">
           <article class="metric-card metric-primary"><div class="metric-label"><span>01</span> MATCHED CALLS <b class="spark spark-cyan"></b></div><strong id="metric-total">—</strong><small>observations recorded <span class="metric-live"><i></i> LIVE FEED</span></small></article>
-          <article class="metric-card"><div class="metric-label"><span>02</span> FORK CALLS OK <b class="metric-dot dot-green"></b></div><strong id="metric-ok">—</strong><small>successful <code>eth_call</code> results</small></article>
-          <article class="metric-card"><div class="metric-label"><span>03</span> SIMULATIONS FAILED <b class="metric-dot dot-pink"></b></div><strong id="metric-failed">—</strong><small>reverted or unavailable on fork</small></article>
+          <article class="metric-card"><div class="metric-label"><span>02</span> REVM CALLS OK <b class="metric-dot dot-green"></b></div><strong id="metric-ok">—</strong><small id="metric-ok-sub">successful in-process simulations</small></article>
+          <article class="metric-card"><div class="metric-label"><span>03</span> EXTRACTABLE / FRONT-RUN <b class="metric-dot dot-pink"></b></div><strong id="metric-extractable">—</strong><small id="metric-extractable-sub">unguarded value capture detected</small></article>
           <article class="metric-card metric-time"><div class="metric-label"><span>04</span> LAST OBSERVATION <b class="spark spark-pink"></b></div><strong id="metric-last">—</strong><small id="metric-last-sub">Waiting for a selector match</small></article>
         </section>
 
         <section class="workspace-grid">
           <article class="panel field-panel">
-            <div class="panel-head"><div><div class="panel-kicker">SIGNAL / 01</div><h2>Observation field</h2></div><div class="panel-meta"><span class="live-tag"><i></i> POLLING</span><span>MAINNET</span></div></div>
+            <div class="panel-head"><div><div class="panel-kicker">SIGNAL / 01</div><h2>Observation field</h2></div><div class="panel-meta"><span class="live-tag"><i></i> REVM ENGINE</span><span>MAINNET</span></div></div>
             <div class="field-stage">
               <canvas id="field-canvas" aria-label="Abstract animated visualization of the observation field"></canvas>
               <div class="field-grid"></div>
               <div class="field-ring ring-one"></div><div class="field-ring ring-two"></div><div class="field-ring ring-three"></div>
-              <div class="field-core"><span class="core-halo"></span><span class="core-point"></span><span class="core-label">PENDING<br />CALLS</span></div>
-              <div class="field-node node-a"><i></i><span>SELECTOR<br /><b>WATCH</b></span></div>
-              <div class="field-node node-b"><i></i><span>LOCAL<br /><b>FORK</b></span></div>
-              <div class="field-node node-c"><i></i><span>READ ONLY<br /><b>ETH_CALL</b></span></div>
-              <div class="field-coordinate coord-a">37° 46' 49.2\" N<br />122° 25' 09.6\" W</div>
-              <div class="field-coordinate coord-b">FIELD 01<br /><span>AMBIENT MAP · NOT TX ROUTING</span></div>
+              <div class="field-core"><span class="core-halo"></span><span class="core-point"></span><span class="core-label">PENDING<br />STREAM</span></div>
+              <div class="field-node node-a"><i></i><span>ALLOY<br /><b>ABI DECODE</b></span></div>
+              <div class="field-node node-b"><i></i><span>IN-PROCESS<br /><b>REVM</b></span></div>
+              <div class="field-node node-c"><i></i><span>CALLER PROBE<br /><b>PROFIT SCORE</b></span></div>
+              <div class="field-coordinate coord-a">STAGE LATENCY<br /><span id="field-latency-badge">MEDIAN —</span></div>
+              <div class="field-coordinate coord-b">RUST + ALLOY + REVM<br /><span>READ-ONLY · NO TX BROADCAST</span></div>
               <div class="field-scan"></div>
-              <div class="field-footer"><span><i class="legend-dot cyan"></i> OBSERVER</span><span><i class="legend-dot pink"></i> SIMULATION</span><span class="field-footer-right">VISUAL INDEX / 01</span></div>
+              <div class="field-footer"><span><i class="legend-dot cyan"></i> ALLOY WS</span><span><i class="legend-dot pink"></i> REVM PROBE</span><span class="field-footer-right">VISUAL INDEX / 02</span></div>
             </div>
-            <div class="field-caption"><span>THE PENDING FIELD</span><span>Abstract visualization · transaction relationships are not represented</span></div>
+            <div class="field-caption"><span>5-STAGE PIPELINE TELEMETRY</span><span id="stage-telemetry-strip">INGEST — · DECODE — · SIM — · PROBE —</span></div>
           </article>
 
           <aside class="side-stack">
             <article class="panel status-panel">
-              <div class="panel-head compact"><div><div class="panel-kicker">SYSTEM / 02</div><h2>Observer status</h2></div><span class="status-emblem">◉</span></div>
+              <div class="panel-head compact"><div><div class="panel-kicker">SYSTEM / 02</div><h2>Engine status</h2></div><span class="status-emblem">◉</span></div>
               <div class="status-line"><span class="status-symbol good">↗</span><div><b>Read-only feed API</b><small id="feed-detail">Waiting for API response</small></div><span id="feed-pill" class="state-pill waiting">CHECKING</span></div>
-              <div class="status-line"><span class="status-symbol violet">⌁</span><div><b>Simulation target</b><small>Local Anvil · eth_call only</small></div><span class="state-pill ready">LOCAL ONLY</span></div>
+              <div class="status-line"><span class="status-symbol violet">⌁</span><div><b>Simulation &amp; probe</b><small>In-process Rust Revm + CacheDB</small></div><span class="state-pill ready">REVM v43</span></div>
               <div class="status-divider"></div>
-              <div class="watch-heading"><span>SELECTOR WATCH</span><b>25 <small>signatures</small></b></div>
-              <div class="watch-bars" aria-label="Selector categories"><div><span>CLAIM / WITHDRAW</span><i><b class="bar-32"></b></i><em>08</em></div><div><span>UNISWAP V2 / V3</span><i><b class="bar-64"></b></i><em>16</em></div><div><span>LIQUIDATION</span><i><b class="bar-18"></b></i><em>02</em></div></div>
-              <p class="tiny-note">Selector list is configured in the scanner.</p>
+              <div class="watch-heading"><span>SELECTOR WATCH</span><b>34 <small>ABI signatures</small></b></div>
+              <div class="watch-bars" aria-label="Selector categories">
+                <div><span>CLAIM / WITHDRAW</span><i><b class="bar-32"></b></i><em>11</em></div>
+                <div><span>DEX SWAPS (UR/V2/V3)</span><i><b class="bar-64"></b></i><em>20</em></div>
+                <div><span>LIQUIDATION</span><i><b class="bar-18"></b></i><em>03</em></div>
+              </div>
+              <p class="tiny-note">Typed SolCall ABI decoding &amp; recipient rewrite enabled.</p>
             </article>
 
             <article class="panel latest-panel">
@@ -91,47 +96,50 @@
 
         <section id="activity" class="panel activity-panel">
           <div class="panel-head activity-head"><div><div class="panel-kicker">OBSERVATIONS / 04</div><h2>Recent activity <span id="activity-count" class="count-chip">0</span></h2></div><div class="activity-tools"><span id="updated-at">UPDATED —</span><button id="clear-filter" type="button" class="filter-chip active-filter">ALL MATCHES <span>⌄</span></button></div></div>
-          <div class="table-scroll"><table><thead><tr><th>FUNCTION</th><th>TRANSACTION</th><th>FROM</th><th>TO</th><th>VALUE</th><th>GAS</th><th>FORK RESULT</th><th>TIME (UTC)</th></tr></thead><tbody id="activity-body"><tr class="empty-row"><td colspan="8"><span class="empty-mark">⌁</span><b>Waiting for the first selector match</b><small>Only actual observations are shown here. No sample transactions are inserted.</small></td></tr></tbody></table></div>
-          <div class="table-foot"><span><i class="legend-dot cyan"></i> <span id="shown-count">0</span> OBSERVATIONS SHOWN</span><span>RAW APPEND-ONLY LOG · <code>logs/hits.jsonl</code></span><span class="table-foot-right">POLLING EVERY 5 SEC</span></div>
+          <div class="table-scroll"><table><thead><tr><th>FUNCTION / DECODED ABI</th><th>TRANSACTION</th><th>FROM</th><th>TO</th><th>VALUE</th><th>GAS USED</th><th>FRONT-RUN PROBE</th><th>FORK RESULT</th><th>TIME (UTC)</th></tr></thead><tbody id="activity-body"><tr class="empty-row"><td colspan="9"><span class="empty-mark">⌁</span><b>Waiting for the first selector match</b><small>Only actual observations are shown here. No sample transactions are inserted.</small></td></tr></tbody></table></div>
+          <div class="table-foot"><span><i class="legend-dot cyan"></i> <span id="shown-count">0</span> OBSERVATIONS SHOWN</span><span>APPEND-ONLY JSONL · <code>logs/hits.jsonl</code></span><span class="table-foot-right">POLLING EVERY 5 SEC</span></div>
         </section>
 
         <section id="fork" class="panel fork-panel" aria-labelledby="fork-title">
           <div class="panel-head activity-head">
             <div>
               <div class="panel-kicker">EVIDENCE / 05</div>
-              <h2 id="fork-title">Fork quality <span id="fork-window-chip" class="count-chip">0</span></h2>
+              <h2 id="fork-title">Fork &amp; front-run quality <span id="fork-window-chip" class="count-chip">0</span></h2>
             </div>
             <div class="activity-tools"><span id="fork-window-note">WINDOW —</span></div>
           </div>
           <div class="fork-body">
-            <div id="fork-rollup" class="fork-rollup" aria-live="polite"></div>
+            <div>
+              <div id="fork-rollup" class="fork-rollup" aria-live="polite"></div>
+              <div id="frontrun-rollup" class="frontrun-summary"></div>
+            </div>
             <div class="fork-aside">
               <p id="fork-rollup-note" class="fork-note">Waiting for the first observation.</p>
               <dl class="fork-stats">
                 <div><dt>MEDIAN LAG</dt><dd id="fork-lag-median">—</dd></div>
-                <div><dt>MAX LAG</dt><dd id="fork-lag-max">—</dd></div>
+                <div><dt>MEDIAN REVM SIM</dt><dd id="fork-sim-median">—</dd></div>
                 <div><dt>STABILITY CHECKED</dt><dd id="fork-checked">—</dd></div>
               </dl>
               <ul class="fork-legend">
-                <li><b class="fk-chip" data-kind="candidate">candidate</b><span>Call succeeded at the fork head and at the reference block.</span></li>
-                <li><b class="fk-chip" data-kind="state_dependent">state_dependent</b><span>Outcome changes when only the block changes, so it is not a plain candidate.</span></li>
-                <li><b class="fk-chip" data-kind="stale_fork">stale_fork</b><span>The fork trailed the provider by more than the allowed lag.</span></li>
-                <li><b class="fk-chip" data-kind="no_code">no_code</b><span>The target held no contract code, so the call could not have been real.</span></li>
-                <li><b class="fk-chip" data-kind="sim_failed">sim_failed</b><span>The replay reverted; the decoded reason is in the record when available.</span></li>
+                <li><b class="fk-chip" data-kind="extractable">extractable</b><span>Probe captured positive ETH or ERC-20 value via caller/recipient substitution.</span></li>
+                <li><b class="fk-chip" data-kind="beneficiary_locked">beneficiary_locked</b><span>Probe call succeeded on-chain, but payout remained bound to original victim.</span></li>
+                <li><b class="fk-chip" data-kind="sender_protected">sender_protected</b><span>Probe reverted when caller changed (proper msg.sender / signature access control).</span></li>
+                <li><b class="fk-chip" data-kind="candidate">candidate</b><span>Primary call succeeded at the state head and stability reference block.</span></li>
+                <li><b class="fk-chip" data-kind="state_dependent">state_dependent</b><span>Outcome flips between state head and reference block.</span></li>
               </ul>
             </div>
           </div>
         </section>
 
         <section id="method" class="method-strip">
-          <div><span class="method-number">01</span><b>OBSERVE</b><small>Pending transaction hash</small></div><span class="method-arrow">→</span>
-          <div><span class="method-number">02</span><b>IDENTIFY</b><small>Configured 4-byte selector</small></div><span class="method-arrow">→</span>
-          <div><span class="method-number">03</span><b>SIMULATE</b><small>Real calldata · local fork</small></div><span class="method-arrow">→</span>
-          <div><span class="method-number">04</span><b>RECORD</b><small>Classified · never broadcast</small></div>
-          <div class="method-stamp">READ ONLY<br /><strong>BY DESIGN</strong></div>
+          <div><span class="method-number">01</span><b>INGEST</b><small>Alloy WS full-tx stream</small></div><span class="method-arrow">→</span>
+          <div><span class="method-number">02</span><b>DECODE</b><small>Typed SolCall ABI</small></div><span class="method-arrow">→</span>
+          <div><span class="method-number">03</span><b>SIMULATE</b><small>In-process Rust Revm</small></div><span class="method-arrow">→</span>
+          <div><span class="method-number">04</span><b>PROBE &amp; SCORE</b><small>Caller/recipient &amp; net profit</small></div>
+          <div class="method-stamp">READ ONLY<br /><strong>NO SIGNING</strong></div>
         </section>
       </main>
-      <footer class="footer"><a class="footer-brand" href="#top">MEMPOOL <span>OBSERVATORY</span></a><span>ANALYSIS SNAPSHOT · NOT FINANCIAL OR SECURITY ADVICE</span><span>OHIO NODE <i></i> ONLINE</span></footer>
+      <footer class="footer"><a class="footer-brand" href="#top">MEMPOOL <span>OBSERVATORY</span></a><span>SECURITY RESEARCH SNAPSHOT · NEVER SIGNS OR BROADCASTS</span><span>OHIO NODE · RUST REVM <i></i> ONLINE</span></footer>
     </div>
   </body>
 </html>
