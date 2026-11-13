@@ -31,10 +31,10 @@ function setOnline(online, message = "") {
   const label = $("#feed-pill");
   const detail = $("#feed-detail");
   badge.classList.toggle("offline", !online);
-  badge.querySelector("b").textContent = online ? "LIVE FEED" : "OFFLINE";
-  label.textContent = online ? "CONNECTED" : "RETRYING";
+  badge.querySelector("b").textContent = online ? "API ONLINE" : "API OFFLINE";
+  label.textContent = online ? "API ONLINE" : "RETRYING";
   label.className = `state-pill ${online ? "ready" : "waiting"}`;
-  detail.textContent = message || (online ? "Read-only observations available" : "Retrying connection");
+  detail.textContent = message || (online ? "Recent-hit endpoint reachable" : "Retrying connection");
 }
 
 function makeCell(text, className = "") {
@@ -116,7 +116,7 @@ async function refresh() {
     $("#updated-at").textContent = `UPDATED ${new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" })} UTC`;
     render();
   } catch (error) {
-    setOnline(false, "Feed unavailable · retrying");
+    setOnline(false, "API unavailable · retrying");
     $("#updated-at").textContent = "FEED RETRYING";
   }
 }
