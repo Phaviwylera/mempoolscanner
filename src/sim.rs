@@ -166,8 +166,33 @@ pub type U256String = String;
 struct RawExecOutcome {
     sim: SimOutcome,
     actor_eth_gain_wei: u128,
+    actor_eth_spent_wei: u128,
     actor_token_wei_equiv: u128,
+    actor_token_spent_wei: u128,
     actor_token_transfers: usize,
+}
+
+impl RawExecOutcome {
+    fn failed(sim: SimOutcome) -> Self {
+        Self {
+            sim,
+            actor_eth_gain_wei: 0,
+            actor_eth_spent_wei: 0,
+            actor_token_wei_equiv: 0,
+            actor_token_spent_wei: 0,
+            actor_token_transfers: 0,
+        }
+    }
+
+    fn net_inflow_wei(&self) -> u128 {
+        let inflow = self
+            .actor_eth_gain_wei
+            .saturating_add(self.actor_token_wei_equiv);
+        let outflow = self
+            .actor_eth_spent_wei
+            .saturating_add(self.actor_token_spent_wei);
+        inflow.saturating_sub(outflow)
+    }
 }
 
 struct KnownToken {
@@ -192,10 +217,40 @@ const KNOWN_TOKENS: &[KnownToken] = &[
         eth_wei_per_unit: 1_180_000_000_000_000_000,
     },
     KnownToken {
+        addr: address!("ae7ab96520DE3A18E5e111B5EaAb095312D7fE84"),
+        symbol: "stETH",
+        decimals: 18,
+        eth_wei_per_unit: 1_000_000_000_000_000_000,
+    },
+    KnownToken {
+        addr: address!("ae78736Cd615f374D3085123A210448E74Fc6393"),
+        symbol: "rETH",
+        decimals: 18,
+        eth_wei_per_unit: 1_120_000_000_000_000_000,
+    },
+    KnownToken {
+        addr: address!("Be9895146f7AF43049ca1c1AE358B0541Ea49704"),
+        symbol: "cbETH",
+        decimals: 18,
+        eth_wei_per_unit: 1_080_000_000_000_000_000,
+    },
+    KnownToken {
+        addr: address!("Cd5fE23C85820F7B72D0926FC9b05b43E359b7ee"),
+        symbol: "weETH",
+        decimals: 18,
+        eth_wei_per_unit: 1_050_000_000_000_000_000,
+    },
+    KnownToken {
+        addr: address!("bf5495Efe5DB9ce00f80364C8B423567e58d2110"),
+        symbol: "ezETH",
+        decimals: 18,
+        eth_wei_per_unit: 1_030_000_000_000_000_000,
+    },
+    KnownToken {
         addr: address!("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
         symbol: "USDC",
         decimals: 6,
-        eth_wei_per_unit: 330_000_000_000_000, // ~$1 at ~$3,000/ETH
+        eth_wei_per_unit: 330_000_000_000_000,
     },
     KnownToken {
         addr: address!("dAC17F958D2ee523a2206206994597C13D831ec7"),
@@ -216,10 +271,52 @@ const KNOWN_TOKENS: &[KnownToken] = &[
         eth_wei_per_unit: 330_000_000_000_000,
     },
     KnownToken {
+        addr: address!("9D39A5DE30e57443BfF2A8307A4256c8797A3497"),
+        symbol: "sUSDe",
+        decimals: 18,
+        eth_wei_per_unit: 365_000_000_000_000,
+    },
+    KnownToken {
+        addr: address!("853d955aCEf822Db058eb8505911ED77F175b99e"),
+        symbol: "FRAX",
+        decimals: 18,
+        eth_wei_per_unit: 330_000_000_000_000,
+    },
+    KnownToken {
+        addr: address!("6c3ea9036406852006290770BEdFcAbA0e23A0e8"),
+        symbol: "PYUSD",
+        decimals: 6,
+        eth_wei_per_unit: 330_000_000_000_000,
+    },
+    KnownToken {
+        addr: address!("40D16FC0246aD3160Ccc09B8D0D3A2cD28aE6C2f"),
+        symbol: "GHO",
+        decimals: 18,
+        eth_wei_per_unit: 330_000_000_000_000,
+    },
+    KnownToken {
+        addr: address!("f939E0A03FB07F59A73314E73794Be0E57ac1b4E"),
+        symbol: "crvUSD",
+        decimals: 18,
+        eth_wei_per_unit: 330_000_000_000_000,
+    },
+    KnownToken {
         addr: address!("2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"),
         symbol: "WBTC",
         decimals: 8,
-        eth_wei_per_unit: 28_000_000_000_000_000_000, // ~28 ETH/WBTC
+        eth_wei_per_unit: 28_000_000_000_000_000_000,
+    },
+    KnownToken {
+        addr: address!("cbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"),
+        symbol: "cbBTC",
+        decimals: 8,
+        eth_wei_per_unit: 28_000_000_000_000_000_000,
+    },
+    KnownToken {
+        addr: address!("18084fbA666a33d37592fA2633fD49a74DD93a88"),
+        symbol: "tBTC",
+        decimals: 18,
+        eth_wei_per_unit: 28_000_000_000_000_000_000,
     },
     KnownToken {
         addr: address!("1f9840a85d5aF5bf1D1762F925BDADdC4201F984"),
@@ -238,6 +335,42 @@ const KNOWN_TOKENS: &[KnownToken] = &[
         symbol: "LINK",
         decimals: 18,
         eth_wei_per_unit: 5_000_000_000_000_000,
+    },
+    KnownToken {
+        addr: address!("5A98FcBEA516Cf06857215779Fd812CA3beF1B32"),
+        symbol: "LDO",
+        decimals: 18,
+        eth_wei_per_unit: 400_000_000_000_000,
+    },
+    KnownToken {
+        addr: address!("808507121B80c02388fAd14726482e061B8da827"),
+        symbol: "PENDLE",
+        decimals: 18,
+        eth_wei_per_unit: 1_200_000_000_000_000,
+    },
+    KnownToken {
+        addr: address!("57e114B691Db790C35207b2e685D4A43181e6061"),
+        symbol: "ENA",
+        decimals: 18,
+        eth_wei_per_unit: 180_000_000_000_000,
+    },
+    KnownToken {
+        addr: address!("fAbA6f8e4a5E8Ab82F62fe7C39859FA577269BE3"),
+        symbol: "ONDO",
+        decimals: 18,
+        eth_wei_per_unit: 300_000_000_000_000,
+    },
+    KnownToken {
+        addr: address!("6982508145454Ce325dDbE47a25d4ec3d2311933"),
+        symbol: "PEPE",
+        decimals: 18,
+        eth_wei_per_unit: 3_000_000_000,
+    },
+    KnownToken {
+        addr: address!("95aD61b0a150d79219dCF64E1E6Cc01f0B64C4cE"),
+        symbol: "SHIB",
+        decimals: 18,
+        eth_wei_per_unit: 5_000_000_000,
     },
 ];
 
@@ -260,10 +393,13 @@ fn token_wei_equivalent(token: Address, amount: U256) -> u128 {
 fn parse_transfers_and_gains(
     logs: &[Log],
     actor: Address,
-) -> (Vec<TokenTransfer>, u128, usize) {
+) -> (Vec<TokenTransfer>, u128, u128, usize) {
     let mut out = Vec::new();
     let mut actor_wei_equiv: u128 = 0;
+    let mut actor_spent_wei: u128 = 0;
     let mut actor_count: usize = 0;
+    let mut actor_unpriced_count: usize = 0;
+    let mut max_pool_priced_leg_wei: u128 = 0;
 
     for log in logs {
         let topics = log.data.topics();
@@ -273,10 +409,18 @@ fn parse_transfers_and_gains(
             let amount = U256::from_be_slice(&log.data.data[0..32]);
 
             let meta = lookup_token(log.address);
+            let leg_wei = token_wei_equivalent(log.address, amount);
             if to == actor && !amount.is_zero() {
                 actor_count += 1;
-                actor_wei_equiv =
-                    actor_wei_equiv.saturating_add(token_wei_equivalent(log.address, amount));
+                if leg_wei > 0 {
+                    actor_wei_equiv = actor_wei_equiv.saturating_add(leg_wei);
+                } else {
+                    actor_unpriced_count += 1;
+                }
+            } else if from == actor && !amount.is_zero() {
+                actor_spent_wei = actor_spent_wei.saturating_add(leg_wei);
+            } else if leg_wei > max_pool_priced_leg_wei {
+                max_pool_priced_leg_wei = leg_wei;
             }
             if out.len() < 12 {
                 out.push(TokenTransfer {
@@ -291,7 +435,13 @@ fn parse_transfers_and_gains(
         }
     }
 
-    (out, actor_wei_equiv, actor_count)
+    // If actor received an unlisted ERC-20 via an internal pool swap that moved a known
+    // priced asset (WETH/USDC/USDT/DAI/etc.) in the same transaction, use 98% of that leg.
+    if actor_unpriced_count > 0 && actor_wei_equiv == 0 && max_pool_priced_leg_wei > 0 {
+        actor_wei_equiv = max_pool_priced_leg_wei.saturating_mul(98) / 100;
+    }
+
+    (out, actor_wei_equiv, actor_spent_wei, actor_count)
 }
 
 async fn execute_revm_call(
@@ -384,21 +534,16 @@ async fn execute_revm_call(
         let tx_env = match tx_res {
             Ok(t) => t,
             Err(err) => {
-                return RawExecOutcome {
-                    sim: SimOutcome {
-                        ok: false,
-                        engine: "revm".to_string(),
-                        gas_used: 0,
-                        result_or_error: format!("invalid tx env: {err:?}"),
-                        revert_data: None,
-                        revert_kind: None,
-                        revert_reason: None,
-                        transfers: Vec::new(),
-                    },
-                    actor_eth_gain_wei: 0,
-                    actor_token_wei_equiv: 0,
-                    actor_token_transfers: 0,
-                };
+                return RawExecOutcome::failed(SimOutcome {
+                    ok: false,
+                    engine: "revm".to_string(),
+                    gas_used: 0,
+                    result_or_error: format!("invalid tx env: {err:?}"),
+                    revert_data: None,
+                    revert_kind: None,
+                    revert_reason: None,
+                    transfers: Vec::new(),
+                });
             }
         };
 
@@ -423,7 +568,13 @@ async fn execute_revm_call(
                     } else {
                         0
                     };
-                    let (transfers, tok_wei, tok_count) = parse_transfers_and_gains(&logs, caller);
+                    let eth_spent = if pre_balance > post_balance {
+                        u128::try_from(pre_balance - post_balance).unwrap_or(u128::MAX)
+                    } else {
+                        0
+                    };
+                    let (transfers, tok_wei, tok_spent, tok_count) =
+                        parse_transfers_and_gains(&logs, caller);
                     RawExecOutcome {
                         sim: SimOutcome {
                             ok: true,
@@ -436,7 +587,9 @@ async fn execute_revm_call(
                             transfers,
                         },
                         actor_eth_gain_wei: eth_gain,
+                        actor_eth_spent_wei: eth_spent,
                         actor_token_wei_equiv: tok_wei,
+                        actor_token_spent_wei: tok_spent,
                         actor_token_transfers: tok_count,
                     }
                 }
@@ -451,78 +604,58 @@ async fn execute_revm_call(
                             hex_payload.chars().take(66).collect::<String>()
                         ),
                     };
-                    RawExecOutcome {
-                        sim: SimOutcome {
-                            ok: false,
-                            engine: "revm".to_string(),
-                            gas_used: gas.tx_gas_used(),
-                            result_or_error: one_line_str(&msg),
-                            revert_data: if output.is_empty() {
-                                None
-                            } else {
-                                Some(hex_payload.chars().take(522).collect())
-                            },
-                            revert_kind: decoded.as_ref().map(|(k, _)| k.clone()),
-                            revert_reason: decoded.map(|(_, r)| r),
-                            transfers: Vec::new(),
-                        },
-                        actor_eth_gain_wei: 0,
-                        actor_token_wei_equiv: 0,
-                        actor_token_transfers: 0,
-                    }
-                }
-                ExecutionResult::Halt { reason, gas, .. } => RawExecOutcome {
-                    sim: SimOutcome {
+                    RawExecOutcome::failed(SimOutcome {
                         ok: false,
                         engine: "revm".to_string(),
                         gas_used: gas.tx_gas_used(),
-                        result_or_error: one_line_str(&format!("halted: {reason:?}")),
-                        revert_data: None,
-                        revert_kind: Some("halt".to_string()),
-                        revert_reason: Some(format!("{reason:?}")),
+                        result_or_error: one_line_str(&msg),
+                        revert_data: if output.is_empty() {
+                            None
+                        } else {
+                            Some(hex_payload.chars().take(522).collect())
+                        },
+                        revert_kind: decoded.as_ref().map(|(k, _)| k.clone()),
+                        revert_reason: decoded.map(|(_, r)| r),
                         transfers: Vec::new(),
-                    },
-                    actor_eth_gain_wei: 0,
-                    actor_token_wei_equiv: 0,
-                    actor_token_transfers: 0,
-                },
-            },
-            Err(evm_err) => RawExecOutcome {
-                sim: SimOutcome {
+                    })
+                }
+                ExecutionResult::Halt { reason, gas, .. } => RawExecOutcome::failed(SimOutcome {
                     ok: false,
                     engine: "revm".to_string(),
-                    gas_used: 0,
-                    result_or_error: one_line_str(&format!("revm error: {evm_err}")),
+                    gas_used: gas.tx_gas_used(),
+                    result_or_error: one_line_str(&format!("halted: {reason:?}")),
                     revert_data: None,
-                    revert_kind: None,
-                    revert_reason: None,
+                    revert_kind: Some("halt".to_string()),
+                    revert_reason: Some(format!("{reason:?}")),
                     transfers: Vec::new(),
-                },
-                actor_eth_gain_wei: 0,
-                actor_token_wei_equiv: 0,
-                actor_token_transfers: 0,
+                }),
             },
+            Err(evm_err) => RawExecOutcome::failed(SimOutcome {
+                ok: false,
+                engine: "revm".to_string(),
+                gas_used: 0,
+                result_or_error: one_line_str(&format!("revm error: {evm_err}")),
+                revert_data: None,
+                revert_kind: None,
+                revert_reason: None,
+                transfers: Vec::new(),
+            }),
         }
     })
     .await;
 
     match joined {
         Ok(outcome) => outcome,
-        Err(join_err) => RawExecOutcome {
-            sim: SimOutcome {
-                ok: false,
-                engine: "revm".to_string(),
-                gas_used: 0,
-                result_or_error: one_line_str(&format!("revm task join error: {join_err}")),
-                revert_data: None,
-                revert_kind: None,
-                revert_reason: None,
-                transfers: Vec::new(),
-            },
-            actor_eth_gain_wei: 0,
-            actor_token_wei_equiv: 0,
-            actor_token_transfers: 0,
-        },
+        Err(join_err) => RawExecOutcome::failed(SimOutcome {
+            ok: false,
+            engine: "revm".to_string(),
+            gas_used: 0,
+            result_or_error: one_line_str(&format!("revm task join error: {join_err}")),
+            revert_data: None,
+            revert_kind: None,
+            revert_reason: None,
+            transfers: Vec::new(),
+        }),
     }
 }
 
@@ -572,12 +705,14 @@ fn score_probe(
         };
     }
 
-    let gross_wei = probe
+    let gross_inflow = probe
         .actor_eth_gain_wei
         .saturating_add(probe.actor_token_wei_equiv);
-    let captured_anything = gross_wei > 0 || probe.actor_token_transfers > 0;
+    let gross_outflow = probe
+        .actor_eth_spent_wei
+        .saturating_add(probe.actor_token_spent_wei);
 
-    if !captured_anything {
+    if gross_inflow == 0 && gross_outflow == 0 && probe.actor_token_transfers == 0 {
         return DecisionReport {
             status: "beneficiary_locked".to_string(),
             probe_mode: mode.to_string(),
@@ -594,6 +729,16 @@ fn score_probe(
         };
     }
 
+    if gross_inflow <= gross_outflow {
+        let reason = if gross_outflow > 0 {
+            "PAYABLE SWAP · caller must supply own ETH/token input; no unguarded value extracted"
+        } else {
+            "UNPRICED TOKEN · unknown ERC-20 transfer has no verifiable market value"
+        };
+        return DecisionReport::not_applicable(reason);
+    }
+
+    let gross_wei = gross_inflow - gross_outflow;
     let tip = victim_tip_wei.unwrap_or(1_000_000_000);
     let outbid_tip = (tip + 1_000_000_000).max(tip.saturating_mul(110) / 100);
     let gas_price = (base_fee_wei as u128).saturating_add(outbid_tip);
@@ -602,8 +747,8 @@ fn score_probe(
     if gross_wei > gas_cost {
         let pre_bribe = gross_wei - gas_cost;
         let bribe = pre_bribe.saturating_mul(90) / 100; // 90% builder bribe
-        let net = pre_bribe - bribe;
-        let eth_display = (net as f64) / 1e18;
+        let net = (pre_bribe - bribe).max(1);
+        let inr_approx = (net as f64 / 1e18) * 260_000.0;
         DecisionReport {
             status: "extractable".to_string(),
             probe_mode: mode.to_string(),
@@ -617,45 +762,13 @@ fn score_probe(
             net_profit_wei: net.to_string(),
             probe_token_gains: probe.actor_token_transfers,
             verdict: format!(
-                "READ-ONLY EXTRACTABLE ({mode}) · counterfactual replay est. +{eth_display:.5} ETH net"
-            ),
-        }
-    } else if gross_wei == 0 && probe.actor_token_transfers > 0 {
-        // Captured unpriced ERC-20 token(s): genuinely extractable, value depends on token price.
-        DecisionReport {
-            status: "extractable".to_string(),
-            probe_mode: mode.to_string(),
-            probe_ok: true,
-            probe_gas_used: probe.sim.gas_used,
-            would_frontrun: true,
-            gross_value_wei: "0".to_string(),
-            gas_cost_wei: gas_cost.to_string(),
-            priority_fee_wei: outbid_tip.to_string(),
-            builder_bribe_wei: "0".to_string(),
-            net_profit_wei: "0".to_string(),
-            probe_token_gains: probe.actor_token_transfers,
-            verdict: format!(
-                "READ-ONLY EXTRACTABLE ({mode}) · counterfactual replay observed {} unpriced ERC-20 transfer(s)",
-                probe.actor_token_transfers
+                "READ-ONLY EXTRACTABLE ({mode}) · counterfactual replay est. +₹{inr_approx:.2} net"
             ),
         }
     } else {
-        let deficit = gas_cost - gross_wei;
-        DecisionReport {
-            status: "extractable".to_string(),
-            probe_mode: mode.to_string(),
-            probe_ok: false,
-            probe_gas_used: probe.sim.gas_used,
-            would_frontrun: false,
-            gross_value_wei: gross_wei.to_string(),
-            gas_cost_wei: gas_cost.to_string(),
-            priority_fee_wei: outbid_tip.to_string(),
-            builder_bribe_wei: "0".to_string(),
-            net_profit_wei: format!("-{deficit}"),
-            probe_token_gains: probe.actor_token_transfers,
-            verdict: "EXTRACTABLE BUT UNPROFITABLE · gas + priority outbid exceeds captured value"
-                .to_string(),
-        }
+        DecisionReport::not_applicable(
+            "BELOW GAS COST · priority outbid gas exceeds captured value",
+        )
     }
 }
 
@@ -784,21 +897,16 @@ pub async fn evaluate_transaction(
     .await
     {
         Ok(outcome) => outcome,
-        Err(_) => RawExecOutcome {
-            sim: SimOutcome {
-                ok: false,
-                engine: "revm".to_string(),
-                gas_used: 0,
-                result_or_error: "simulation timed out".to_string(),
-                revert_data: None,
-                revert_kind: None,
-                revert_reason: None,
-                transfers: Vec::new(),
-            },
-            actor_eth_gain_wei: 0,
-            actor_token_wei_equiv: 0,
-            actor_token_transfers: 0,
-        },
+        Err(_) => RawExecOutcome::failed(SimOutcome {
+            ok: false,
+            engine: "revm".to_string(),
+            gas_used: 0,
+            result_or_error: "simulation timed out".to_string(),
+            revert_data: None,
+            revert_kind: None,
+            revert_reason: None,
+            transfers: Vec::new(),
+        }),
     };
     let sim_us = sim_t0.elapsed().as_micros() as u64;
     fork_ev.checked.push(block_num);
@@ -861,9 +969,7 @@ pub async fn evaluate_transaction(
 
         let a_captured = pass_a
             .as_ref()
-            .map(|p| {
-                p.sim.ok && (p.actor_eth_gain_wei > 0 || p.actor_token_transfers > 0)
-            })
+            .map(|p| p.sim.ok && p.net_inflow_wei() > 0)
             .unwrap_or(false);
 
         if a_captured {
@@ -895,9 +1001,7 @@ pub async fn evaluate_transaction(
 
             let b_captured = pass_b
                 .as_ref()
-                .map(|p| {
-                    p.sim.ok && (p.actor_eth_gain_wei > 0 || p.actor_token_transfers > 0)
-                })
+                .map(|p| p.sim.ok && p.net_inflow_wei() > 0)
                 .unwrap_or(false);
 
             if b_captured {
@@ -1215,5 +1319,64 @@ mod tests {
         assert_eq!(record.decision.status, "beneficiary_locked");
         assert!(record.decision.probe_ok);
         assert!(!record.decision.would_frontrun);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn payable_swap_spending_own_eth_is_not_falsely_extractable() {
+        let backend = Arc::new(InMemoryStateBackend::default());
+        let target = address!("aaaa000000000000000000000000000000000099");
+        let sender = address!("bbbb000000000000000000000000000000000099");
+        let one_eth = U256::from(1_000_000_000_000_000_000u128);
+        let tenth_eth = U256::from(100_000_000_000_000_000u128);
+
+        // Emits ERC-20 Transfer(0x0, msg.sender, 1000) while keeping caller's msg.value.
+        let swap_like_code = hex::decode(
+            "6103e86000523360007fddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef60206000a300",
+        )
+        .unwrap();
+
+        backend.insert_account(target, U256::ZERO, Some(swap_like_code));
+        backend.insert_account(sender, one_eth, None);
+
+        // UniversalRouter.execute(bytes,bytes[]) selector `0x24856bc3`
+        let calldata = Bytes::from(vec![0x24, 0x85, 0x6b, 0xc3]);
+        let spec = match_calldata(&calldata).unwrap();
+        let decoded = decode_calldata(spec, &calldata, tenth_eth);
+        let observed = ObservedTx {
+            hash: "0x4444".to_string(),
+            from: sender,
+            to: target,
+            nonce: Some(1),
+            value: tenth_eth,
+            gas_limit: 180_000,
+            tip_wei: Some(1_000_000_000),
+            max_fee_wei: Some(20_000_000_000),
+            calldata,
+            selector_hex: spec.selector_hex.clone(),
+            timestamp_iso: "2026-11-13T12:00:00.000Z".to_string(),
+            ingest_us: 80,
+            source: "ws_full",
+        };
+
+        let record = evaluate_transaction(
+            spec,
+            decoded,
+            5,
+            observed,
+            base_status(21_000_000),
+            None,
+            backend,
+            &SimulationParams {
+                max_lag: 3,
+                depth: 1,
+                timeout: Duration::from_secs(2),
+            },
+        )
+        .await;
+
+        assert!(record.sim.ok);
+        assert_eq!(record.decision.status, "not_applicable");
+        assert!(!record.decision.would_frontrun);
+        assert_eq!(record.decision.gross_value_wei, "0");
     }
 }

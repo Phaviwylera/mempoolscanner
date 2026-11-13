@@ -77,7 +77,7 @@ impl ActiveHitStore {
                 if line.trim().is_empty() {
                     continue;
                 }
-                let Ok(rec) = serde_json::from_str::<HitRecord>(line) else {
+                let Ok(mut rec) = serde_json::from_str::<HitRecord>(line) else {
                     had_skipped = true;
                     continue;
                 };
@@ -86,6 +86,16 @@ impl ActiveHitStore {
                     meta.pruned_locked_to_user = meta.pruned_locked_to_user.saturating_add(1);
                     had_skipped = true;
                     continue;
+                }
+                if rec.decision.status == "extractable"
+                    && (!rec.decision.would_frontrun
+                        || rec.decision.gross_value_wei == "0"
+                        || rec.decision.net_profit_wei == "0"
+                        || rec.decision.net_profit_wei.starts_with('-'))
+                {
+                    rec.decision.status = "not_applicable".to_string();
+                    rec.decision.would_frontrun = false;
+                    had_skipped = true;
                 }
                 let h = rec.hash.to_ascii_lowercase();
                 if seen.insert(h.clone()) {

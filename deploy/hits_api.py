@@ -219,6 +219,12 @@ def decision_status(record: dict[str, object]) -> str:
     decision = record.get("decision")
     if isinstance(decision, dict):
         status = str(decision.get("status", "")).strip()
+        if status == "extractable":
+            gross = as_int(decision.get("gross_value_wei")) or 0
+            net = as_int(decision.get("net_profit_wei")) or 0
+            if gross <= 0 and net <= 0:
+                return "not_applicable"
+            return "extractable"
         if status in FRONTRUN_STATUSES:
             return status
     return "not_applicable"
@@ -476,23 +482,33 @@ def summarise_extractable(
     profitable_count = 0
     total_gross_wei = 0
     total_net_wei = 0
+    recent_tx_value_wei = 0
+    active_tx_count = 0
     token_transfers = 0
 
     for record in records:
         if bool(record.get("closed")):
             continue
+        active_tx_count += 1
+        tx_val = as_int(record.get("value")) or 0
+        decision = record.get("decision")
+        dec_gross = as_int(decision.get("gross_value_wei")) if isinstance(decision, dict) else 0
+        row_wei = max(tx_val, dec_gross or 0)
+        if row_wei > 0:
+            recent_tx_value_wei += row_wei
+
         if decision_status(record) != "extractable":
             continue
         open_count += 1
-        decision = record.get("decision")
         if isinstance(decision, dict):
             if bool(decision.get("would_frontrun")):
                 profitable_count += 1
-            gross = as_int(decision.get("gross_value_wei"))
-            if gross is not None and gross > 0:
-                total_gross_wei += gross
-            net = as_int(decision.get("net_profit_wei"))
-            if net is not None and net > 0:
+            gross = as_int(decision.get("gross_value_wei")) or 0
+            net = as_int(decision.get("net_profit_wei")) or 0
+            eff_gross = gross if gross > 0 else max(0, net)
+            if eff_gross > 0:
+                total_gross_wei += eff_gross
+            if net > 0:
                 total_net_wei += net
             tg = as_int(decision.get("probe_token_gains"))
             if tg is not None and tg > 0:
@@ -506,6 +522,7 @@ def summarise_extractable(
 
     gross_paise = wei_to_paise(total_gross_wei, resolved_rate)
     net_paise = wei_to_paise(total_net_wei, resolved_rate)
+    recent_paise = wei_to_paise(recent_tx_value_wei, resolved_rate)
 
     return {
         "currency": "INR",
@@ -513,12 +530,15 @@ def summarise_extractable(
         "rate_source": rate_source,
         "open_count": open_count,
         "profitable_count": profitable_count,
+        "active_tx_count": active_tx_count,
         "total_gross_wei": str(total_gross_wei),
         "total_net_wei": str(total_net_wei),
+        "recent_tx_value_wei": str(recent_tx_value_wei),
         "total_gross_paise": str(gross_paise),
         "total_net_paise": str(net_paise),
         "total_gross_inr": format_inr_paise(gross_paise),
         "total_net_inr": format_inr_paise(net_paise, plus=net_paise > 0),
+        "recent_tx_value_inr": format_inr_paise(recent_paise),
         "token_transfers": token_transfers,
         "closed_removed": closed_removed,
         "total_observed": total_observed,
