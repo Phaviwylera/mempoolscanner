@@ -4,6 +4,7 @@
 
 use crate::abi::{decode_calldata, match_calldata, REGISTRY};
 use crate::config::Settings;
+use crate::exec::{execute_liquidation, LiquidationOpportunity, ExecConfig};
 use crate::liquidation::liquidation_watcher_loop;
 use crate::sim::{evaluate_transaction, HitRecord, ObservedTx, SimulationParams};
 use crate::state::{one_line_str, ForkMonitor, RpcStateBackend, StateBackend};
@@ -319,7 +320,7 @@ fn now_iso() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-pub async fn run_scanner(settings: Settings) -> Result<()> {
+pub async fn run_scanner(settings: Settings, exec_config: Option<ExecConfig>) -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let state_provider = connect_http_with_retry(&settings.state_rpc).await?;
@@ -415,6 +416,7 @@ pub async fn run_scanner(settings: Settings) -> Result<()> {
         record_tx.clone(),
         settings,
         shutdown_rx,
+        exec_config,
     );
 
     tokio::select! {
@@ -676,6 +678,7 @@ async fn ingestion_supervisor(
     record_tx: mpsc::Sender<HitRecord>,
     settings: Settings,
     mut shutdown_rx: watch::Receiver<bool>,
+    exec_config: Option<Arc<ExecConfig>>,
 ) -> Result<()> {
     let sim_sem = Arc::new(Semaphore::new(settings.worker_concurrency));
     let fetch_sem = Arc::new(Semaphore::new((settings.worker_concurrency * 2).clamp(8, 24)));
@@ -739,6 +742,7 @@ async fn ingestion_supervisor(
                                 &backend,
                                 &sim_params,
                                 &record_tx,
+                                exec_config.clone(),
                             );
                             loop {
                                 tokio::select! {
@@ -757,6 +761,7 @@ async fn ingestion_supervisor(
                                             &backend,
                                             &sim_params,
                                             &record_tx,
+                                            exec_config.clone(),
                                         );
                                     }
                                     _ = shutdown_rx.changed() => return Ok(()),
@@ -889,6 +894,7 @@ fn dispatch_full_tx(
     backend: &Arc<dyn StateBackend>,
     sim_params: &Arc<SimulationParams>,
     record_tx: &mpsc::Sender<HitRecord>,
+    exec_config: Option<Arc<ExecConfig>>,
 ) {
     // Ignore transactions that are already mined/closed on-chain.
     if TransactionResponse::block_number(&tx).is_some() {
@@ -908,6 +914,7 @@ fn dispatch_full_tx(
     };
     let value = ConsensusTx::value(&tx);
     let decoded = decode_calldata(spec, input, value);
+    let decoded_clone = decoded.clone();
     let decode_us = decode_t0.elapsed().as_micros() as u64;
 
     let Ok(sim_permit) = sim_sem.clone().try_acquire_owned() else {
@@ -938,6 +945,7 @@ fn dispatch_full_tx(
         ingest_us,
         source,
     };
+    let observed_clone = observed.clone();
 
     let monitor = monitor.clone();
     let backend = backend.clone();
@@ -966,10 +974,36 @@ fn dispatch_full_tx(
         )
         .await;
 
+        let should_exec = exec_config.is_some()
+            && record.decoded.category == "liquidate"
+            && record.decision.status == "extractable";
+        let record_for_exec = should_exec.then(|| record.clone());
+
         if let Ok(line) = serde_json::to_string(&record) {
             info!("hit {line}");
         }
         let _ = record_tx.send(record).await;
+
+        // Opt-in execution: sign and (unless dry-run) broadcast liquidate hits
+        // that passed the simulation gate. Runs outside the hot store path.
+        if let Some(record) = record_for_exec {
+            let cfg = exec_config.expect("exec_config present when should_exec");
+            let decoded = decoded_clone;
+            let observed = observed_clone;
+            tokio::spawn(async move {
+                let mut opportunity =
+                    LiquidationOpportunity::from_hit_record(&record, &decoded, &observed);
+                opportunity.chain_id = cfg.chain_id;
+                match execute_liquidation(&cfg, &opportunity).await {
+                    Ok(outcome) => {
+                        info!("execution {} -> {:?}", opportunity.id, outcome)
+                    }
+                    Err(err) => {
+                        warn!("execution for {} failed: {}", opportunity.id, err)
+                    }
+                }
+            });
+        }
     });
 }
 

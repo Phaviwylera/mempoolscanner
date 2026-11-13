@@ -1,0 +1,20 @@
+# cargo-deny configuration for mempool-scanner.
+# `cargo deny check --config deny.toml`
+
+[version]
+version = 1
+
+[[advisories]]
+ignore = []
+unmaintained = false
+yanked = false
+
+[bans]
+skip = []
+severity = "error"
+
+# Allow-list the crates used by the opt-in execution module.
+[[lint]]
+crate = "alloy"
+crate = "revm"
+crate = "zeroize"

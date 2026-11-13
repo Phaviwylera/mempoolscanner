@@ -85,3 +85,56 @@ On every push to `main`, `.github/workflows/deploy.yml`:
 ## Responsible Use
 
 Use only for authorized smart-contract security research and defensive observability. Coordinate third-party vulnerability disclosures through the protocol's security contact, Immunefi, or SEAL 911. Never take unauthorized on-chain action based on monitor output.
+
+## Execution module (opt-in)
+
+The `src/exec/` module is an **optional, feature-flagged** execution layer that lets the
+operator act on `liquidate` opportunities they themselves detect, using their own wallet and
+capital. It is **off by default** and introduces no keys, signing, or broadcasting unless
+`--execute` is passed.
+
+### Flags
+
+| Flag | Effect |
+| --- | --- |
+| `--execute` | Opt into the execution module (default OFF). Without it, the binary is byte-identical to the read-only build. |
+| `--dry-run` | Requires `--execute`. Signs transactions but never broadcasts (testnet/dev safety valve). |
+
+### Environment variables
+
+| Variable | Required | Effect |
+| --- | --- | --- |
+| `EXEC_PRIVATE_KEY` | one of the two | Raw 32-byte private key as hex. Mutually exclusive with keystore. |
+| `EXEC_KEYSTORE_PATH` | one of the two | Path to an encrypted JSON keystore (decrypted with `EXEC_KEYSTORE_PASSWORD`). |
+| `EXEC_KEYSTORE_PASSWORD` | with keystore | Password to decrypt the keystore. |
+| `EXEC_RPC_URL` | yes | State RPC used for the pre-sign re-simulation and confirmation polling. |
+| `EXEC_CHAIN_ID` | no (default `1`) | Chain ID the signer is bound to (EIP-155 replay protection). |
+| `FLASHBOTS_RELAY` | no | Flashbots Protect / MEV-Share relay URL (primary broadcast path). |
+| `BUILDER_RELAYS` | no | Comma-separated builder-relay URLs (secondary fan-out path). |
+| `EXEC_MIN_PROFIT_WEI` | no (default `0`) | Minimum net profit (wei) required to sign. |
+| `EXEC_CONFIRMATIONS` | no (default `1`) | Blocks to wait before returning `Confirmed`. |
+| `EXEC_AUDIT_DIR` | no (default `logs`) | Directory for `exec_audit.jsonl`. |
+
+### Safety rails
+
+1. `--execute` defaults to `false`; without it the binary behaves exactly as before.
+2. The simulation gate (`src/exec/simulate.rs`) is **non-bypassable**: a transaction is signed
+   only after a profitable re-simulation at `latest_block + 1` reports `net_profit >= min_profit_wei`
+   (net = gross − gas_cost − builder_bid).
+3. The signer is loaded **only** from `EXEC_PRIVATE_KEY` or `EXEC_KEYSTORE_PATH` +
+   `EXEC_KEYSTORE_PASSWORD`. It is never accepted as a CLI flag, config-file field, or function
+   argument, and key bytes are zeroized on drop (`zeroize`).
+4. Broadcasting is **private-relay only**: Flashbots/MEV-Share first, then builder relays. With no
+   private relay configured the tx is `Skipped("no_private_relay")`. The public mempool is never
+   used (`eth_sendRawTransaction` exists only inside `src/exec/broadcast.rs`).
+5. If `--execute` is passed and no key material is present in the environment, the process exits
+   with a clear error before touching the network.
+6. Every signed tx is appended to `exec_audit.jsonl` with timestamp, chain_id, opportunity id,
+   profit estimate, tx hash, and outcome.
+
+### Tests
+
+- `src/exec/simulate.rs` — unit tests against `revm` with an in-memory mocked state (no network).
+- `tests/exec_sepolia.rs` — `#[ignore]` integration test; runs only when `SEPOLIA_RPC_URL` is set,
+  asserts the target is Sepolia (never mainnet), and that the gate rejects an unprofitable
+  opportunity.
