@@ -22,6 +22,7 @@ install -o root -g root -m 0644 "$ROOT/deploy/systemd/mempolscan-anvil.service" 
 install -o root -g root -m 0644 "$ROOT/deploy/systemd/mempolscan.service" /etc/systemd/system/mempolscan.service
 install -o root -g root -m 0644 "$ROOT/deploy/systemd/mempolscan-api.service" /etc/systemd/system/mempolscan-api.service
 install -o root -g root -m 0644 "$ROOT/deploy/nginx-mempolscan.conf" /etc/nginx/sites-available/mempolscan
+chmod 0755 "$ROOT" "$ROOT/web"
 ln -sfn /etc/nginx/sites-available/mempolscan /etc/nginx/sites-enabled/mempolscan
 rm -f /etc/nginx/sites-enabled/default
 nginx -t
