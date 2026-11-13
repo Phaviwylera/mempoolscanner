@@ -59,7 +59,7 @@ pub struct TokenTransfer {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SimOutcome {
     pub ok: bool,
-    pub engine: &'static str,
+    pub engine: String,
     pub gas_used: u64,
     pub result_or_error: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -94,9 +94,9 @@ pub struct ForkEvidence {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DecisionReport {
     /// `"extractable"` | `"beneficiary_locked"` | `"sender_protected"` | `"not_applicable"`
-    pub status: &'static str,
+    pub status: String,
     /// `"caller_substitution"` | `"recipient_rewrite"` | `"none"`
-    pub probe_mode: &'static str,
+    pub probe_mode: String,
     pub probe_ok: bool,
     pub probe_gas_used: u64,
     pub would_frontrun: bool,
@@ -112,8 +112,8 @@ pub struct DecisionReport {
 impl DecisionReport {
     pub fn not_applicable(reason: &str) -> Self {
         Self {
-            status: "not_applicable",
-            probe_mode: "none",
+            status: "not_applicable".to_string(),
+            probe_mode: "none".to_string(),
             probe_ok: false,
             probe_gas_used: 0,
             would_frontrun: false,
@@ -130,7 +130,7 @@ impl DecisionReport {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StageTelemetry {
-    pub source: &'static str,
+    pub source: String,
     pub ingest_us: u64,
     pub decode_us: u64,
     pub sim_us: u64,
@@ -378,7 +378,7 @@ async fn execute_revm_call(
             return RawExecOutcome {
                 sim: SimOutcome {
                     ok: false,
-                    engine: "revm",
+                    engine: "revm".to_string(),
                     gas_used: 0,
                     result_or_error: format!("invalid tx env: {err:?}"),
                     revert_data: None,
@@ -418,7 +418,7 @@ async fn execute_revm_call(
                 RawExecOutcome {
                     sim: SimOutcome {
                         ok: true,
-                        engine: "revm",
+                        engine: "revm".to_string(),
                         gas_used: gas.tx_gas_used(),
                         result_or_error: format!("0x{}", hex::encode(&data)),
                         revert_data: None,
@@ -445,7 +445,7 @@ async fn execute_revm_call(
                 RawExecOutcome {
                     sim: SimOutcome {
                         ok: false,
-                        engine: "revm",
+                        engine: "revm".to_string(),
                         gas_used: gas.tx_gas_used(),
                         result_or_error: one_line_str(&msg),
                         revert_data: if output.is_empty() {
@@ -465,7 +465,7 @@ async fn execute_revm_call(
             ExecutionResult::Halt { reason, gas, .. } => RawExecOutcome {
                 sim: SimOutcome {
                     ok: false,
-                    engine: "revm",
+                    engine: "revm".to_string(),
                     gas_used: gas.tx_gas_used(),
                     result_or_error: one_line_str(&format!("halted: {reason:?}")),
                     revert_data: None,
@@ -481,7 +481,7 @@ async fn execute_revm_call(
         Ok(Err(evm_err)) => RawExecOutcome {
             sim: SimOutcome {
                 ok: false,
-                engine: "revm",
+                engine: "revm".to_string(),
                 gas_used: 0,
                 result_or_error: one_line_str(&format!("revm error: {evm_err}")),
                 revert_data: None,
@@ -496,7 +496,7 @@ async fn execute_revm_call(
         Err(async_err) => RawExecOutcome {
             sim: SimOutcome {
                 ok: false,
-                engine: "revm",
+                engine: "revm".to_string(),
                 gas_used: 0,
                 result_or_error: one_line_str(&format!("async db error: {async_err}")),
                 revert_data: None,
@@ -542,8 +542,8 @@ fn score_probe(
             .as_deref()
             .unwrap_or(&probe.sim.result_or_error);
         return DecisionReport {
-            status: "sender_protected",
-            probe_mode: mode,
+            status: "sender_protected".to_string(),
+            probe_mode: mode.to_string(),
             probe_ok: false,
             probe_gas_used: probe.sim.gas_used,
             would_frontrun: false,
@@ -564,8 +564,8 @@ fn score_probe(
 
     if !captured_anything {
         return DecisionReport {
-            status: "beneficiary_locked",
-            probe_mode: mode,
+            status: "beneficiary_locked".to_string(),
+            probe_mode: mode.to_string(),
             probe_ok: true,
             probe_gas_used: probe.sim.gas_used,
             would_frontrun: false,
@@ -590,8 +590,8 @@ fn score_probe(
         let net = pre_bribe - bribe;
         let eth_display = (net as f64) / 1e18;
         DecisionReport {
-            status: "extractable",
-            probe_mode: mode,
+            status: "extractable".to_string(),
+            probe_mode: mode.to_string(),
             probe_ok: true,
             probe_gas_used: probe.sim.gas_used,
             would_frontrun: true,
@@ -608,8 +608,8 @@ fn score_probe(
     } else if gross_wei == 0 && probe.actor_token_transfers > 0 {
         // Captured unpriced ERC-20 token(s): genuinely extractable, value depends on token price.
         DecisionReport {
-            status: "extractable",
-            probe_mode: mode,
+            status: "extractable".to_string(),
+            probe_mode: mode.to_string(),
             probe_ok: true,
             probe_gas_used: probe.sim.gas_used,
             would_frontrun: true,
@@ -627,8 +627,8 @@ fn score_probe(
     } else {
         let deficit = gas_cost - gross_wei;
         DecisionReport {
-            status: "extractable",
-            probe_mode: mode,
+            status: "extractable".to_string(),
+            probe_mode: mode.to_string(),
             probe_ok: false,
             probe_gas_used: probe.sim.gas_used,
             would_frontrun: false,
@@ -682,7 +682,7 @@ pub async fn evaluate_transaction(
     let Some(block_num) = fork_status.block else {
         let sim = SimOutcome {
             ok: false,
-            engine: "revm",
+            engine: "revm".to_string(),
             gas_used: 0,
             result_or_error: "fork head unavailable".to_string(),
             revert_data: None,
@@ -721,7 +721,7 @@ pub async fn evaluate_transaction(
         fork_ev.code_present = Some(false);
         let sim = SimOutcome {
             ok: false,
-            engine: "revm",
+            engine: "revm".to_string(),
             gas_used: 0,
             result_or_error: "no contract code at target on the fork".to_string(),
             revert_data: None,
@@ -772,7 +772,7 @@ pub async fn evaluate_transaction(
         Err(_) => RawExecOutcome {
             sim: SimOutcome {
                 ok: false,
-                engine: "revm",
+                engine: "revm".to_string(),
                 gas_used: 0,
                 result_or_error: "simulation timed out".to_string(),
                 revert_data: None,
@@ -964,7 +964,7 @@ fn finish_record(
         decoded,
         decision,
         telemetry: StageTelemetry {
-            source: observed.source,
+            source: observed.source.to_string(),
             ingest_us: observed.ingest_us,
             decode_us,
             sim_us,

@@ -295,10 +295,10 @@ fn dispatch_full_tx(
     sim_params: &Arc<SimulationParams>,
     record_tx: &mpsc::Sender<HitRecord>,
 ) {
-    let Some(to_addr) = ConsensusTx::to(&tx.inner) else {
+    let Some(to_addr) = ConsensusTx::to(&tx) else {
         return;
     };
-    let input = ConsensusTx::input(&tx.inner);
+    let input = ConsensusTx::input(&tx);
     if input.len() < 4 {
         return;
     }
@@ -307,7 +307,7 @@ fn dispatch_full_tx(
     let Some(spec) = match_calldata(input) else {
         return;
     };
-    let value = ConsensusTx::value(&tx.inner);
+    let value = ConsensusTx::value(&tx);
     let decoded = decode_calldata(spec, input, value);
     let decode_us = decode_t0.elapsed().as_micros() as u64;
 
@@ -317,9 +317,9 @@ fn dispatch_full_tx(
 
     let from_addr = TransactionResponse::from(&tx);
     let tx_hash = TransactionResponse::tx_hash(&tx);
-    let gas_limit = ConsensusTx::gas_limit(&tx.inner);
-    let tip_wei = ConsensusTx::max_priority_fee_per_gas(&tx.inner);
-    let max_fee_wei = Some(ConsensusTx::max_fee_per_gas(&tx.inner));
+    let gas_limit = ConsensusTx::gas_limit(&tx);
+    let tip_wei = ConsensusTx::max_priority_fee_per_gas(&tx);
+    let max_fee_wei = Some(ConsensusTx::max_fee_per_gas(&tx));
     let calldata = input.clone();
     let ts_iso = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
 

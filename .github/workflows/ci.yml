@@ -32,12 +32,7 @@ jobs:
         run: |
           set -o pipefail
           if ! cargo test --all-targets 2>&1 | tee /tmp/cargo-test.log; then
-            grep -E "^error|panicked|FAILED" /tmp/cargo-test.log | head -n 25 | while IFS= read -r line; do
-              echo "::error::${line}"
-            done
-            tail -n 30 /tmp/cargo-test.log | while IFS= read -r line; do
-              echo "::notice::${line}"
-            done
+            python3 -c 'import pathlib; ls=pathlib.Path("/tmp/cargo-test.log").read_text(errors="replace").splitlines(); [print("::error::"+" | ".join(x.strip() for x in ls[i:i+4] if x.strip())[:400]) for i,l in enumerate(ls) if l.startswith("error") or "panicked at" in l or "FAILED" in l][:25]'
             exit 1
           fi
 
