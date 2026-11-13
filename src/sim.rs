@@ -13,7 +13,7 @@ use revm::database::CacheDB;
 use revm::primitives::eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_PRAGUE;
 use revm::primitives::{address, b256, hardfork::SpecId, Address, Bytes, Log, TxKind, B256, KECCAK_EMPTY, U256};
 use revm::state::AccountInfo;
-use revm::{AsyncDb, Context, ExecuteEvmAsync, MainBuilder, MainContext};
+use revm::{AsyncDb, Context, ExecuteEvm, MainBuilder, MainContext};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -301,25 +301,8 @@ async fn execute_revm_call(
     gas_limit: u64,
     seed_probe: bool,
 ) -> RawExecOutcome {
-    let view = PinnedStateView {
-        backend: backend.clone(),
-        block: snap.number,
-    };
-    let mut cache_db = CacheDB::new(AsyncDb::new(view));
-
     let pre_balance = if seed_probe {
-        let seed = U256::from(PROBE_SEED_ETH).saturating_add(value);
-        cache_db.insert_account_info(
-            caller,
-            AccountInfo {
-                balance: seed,
-                nonce: 0,
-                code_hash: KECCAK_EMPTY,
-                code: Some(Bytecode::default()),
-                ..Default::default()
-            },
-        );
-        seed
+        U256::from(PROBE_SEED_ETH).saturating_add(value)
     } else {
         backend
             .basic(snap.number, caller)
@@ -330,57 +313,183 @@ async fn execute_revm_call(
             .unwrap_or(U256::ZERO)
     };
 
-    let effective_gas_limit = if gas_limit >= 21_000 {
-        gas_limit
-    } else {
-        3_000_000
-    };
+    let snap_owned = snap.clone();
+    let handle = tokio::runtime::Handle::current();
 
-    let mut evm = Context::mainnet()
-        .with_db(&mut cache_db)
-        .modify_cfg_chained(|cfg| {
-            cfg.set_spec_and_mainnet_gas_params(SpecId::PRAGUE);
-            cfg.chain_id = 1;
-            cfg.tx_chain_id_check = false;
-            cfg.disable_nonce_check = true;
-            cfg.disable_balance_check = true;
-            cfg.disable_block_gas_limit = true;
-            cfg.disable_eip3607 = true;
-            cfg.disable_base_fee = true;
-            cfg.disable_fee_charge = true;
-            cfg.tx_gas_limit_cap = Some(u64::MAX);
-        })
-        .modify_block_chained(|b| {
-            b.number = U256::from(snap.number);
-            b.timestamp = U256::from(snap.timestamp);
-            b.basefee = snap.base_fee;
-            b.beneficiary = snap.beneficiary;
-            b.gas_limit = snap.gas_limit.max(effective_gas_limit);
-            b.prevrandao = snap.prevrandao.or(Some(B256::ZERO));
-            b.blob_excess_gas_and_price = snap.excess_blob_gas.map(|excess| {
-                BlobExcessGasAndPrice::new(excess, BLOB_BASE_FEE_UPDATE_FRACTION_PRAGUE)
-            });
-        })
-        .build_mainnet();
+    let joined = tokio::task::spawn_blocking(move || {
+        let view = PinnedStateView {
+            backend,
+            block: snap_owned.number,
+        };
+        let mut cache_db = CacheDB::new(AsyncDb::with_handle(view, handle));
 
-    let tx_res = TxEnv::builder()
-        .caller(caller)
-        .kind(TxKind::Call(to))
-        .data(calldata)
-        .value(value)
-        .gas_limit(effective_gas_limit)
-        .gas_price(snap.base_fee as u128)
-        .build();
+        if seed_probe {
+            cache_db.insert_account_info(
+                caller,
+                AccountInfo {
+                    balance: pre_balance,
+                    nonce: 0,
+                    code_hash: KECCAK_EMPTY,
+                    code: Some(Bytecode::default()),
+                    ..Default::default()
+                },
+            );
+        }
 
-    let tx_env = match tx_res {
-        Ok(t) => t,
-        Err(err) => {
-            return RawExecOutcome {
+        let effective_gas_limit = if gas_limit >= 21_000 {
+            gas_limit
+        } else {
+            3_000_000
+        };
+
+        let mut evm = Context::mainnet()
+            .with_db(&mut cache_db)
+            .modify_cfg_chained(|cfg| {
+                cfg.set_spec_and_mainnet_gas_params(SpecId::PRAGUE);
+                cfg.chain_id = 1;
+                cfg.tx_chain_id_check = false;
+                cfg.disable_nonce_check = true;
+                cfg.disable_balance_check = true;
+                cfg.disable_block_gas_limit = true;
+                cfg.disable_eip3607 = true;
+                cfg.disable_base_fee = true;
+                cfg.disable_fee_charge = true;
+                cfg.tx_gas_limit_cap = Some(u64::MAX);
+            })
+            .modify_block_chained(|b| {
+                b.number = U256::from(snap_owned.number);
+                b.timestamp = U256::from(snap_owned.timestamp);
+                b.basefee = snap_owned.base_fee;
+                b.beneficiary = snap_owned.beneficiary;
+                b.gas_limit = snap_owned.gas_limit.max(effective_gas_limit);
+                b.prevrandao = snap_owned.prevrandao.or(Some(B256::ZERO));
+                b.blob_excess_gas_and_price = snap_owned.excess_blob_gas.map(|excess| {
+                    BlobExcessGasAndPrice::new(excess, BLOB_BASE_FEE_UPDATE_FRACTION_PRAGUE)
+                });
+            })
+            .build_mainnet();
+
+        let tx_res = TxEnv::builder()
+            .caller(caller)
+            .kind(TxKind::Call(to))
+            .data(calldata)
+            .value(value)
+            .gas_limit(effective_gas_limit)
+            .gas_price(snap_owned.base_fee as u128)
+            .build();
+
+        let tx_env = match tx_res {
+            Ok(t) => t,
+            Err(err) => {
+                return RawExecOutcome {
+                    sim: SimOutcome {
+                        ok: false,
+                        engine: "revm".to_string(),
+                        gas_used: 0,
+                        result_or_error: format!("invalid tx env: {err:?}"),
+                        revert_data: None,
+                        revert_kind: None,
+                        revert_reason: None,
+                        transfers: Vec::new(),
+                    },
+                    actor_eth_gain_wei: 0,
+                    actor_token_wei_equiv: 0,
+                    actor_token_transfers: 0,
+                };
+            }
+        };
+
+        match evm.transact(tx_env) {
+            Ok(exec) => match exec.result {
+                ExecutionResult::Success {
+                    gas,
+                    logs,
+                    output,
+                    ..
+                } => {
+                    let data = match output {
+                        Output::Call(b) | Output::Create(b, _) => b,
+                    };
+                    let post_balance = exec
+                        .state
+                        .get(&caller)
+                        .map(|acc| acc.info.balance)
+                        .unwrap_or(pre_balance);
+                    let eth_gain = if post_balance > pre_balance {
+                        u128::try_from(post_balance - pre_balance).unwrap_or(u128::MAX)
+                    } else {
+                        0
+                    };
+                    let (transfers, tok_wei, tok_count) = parse_transfers_and_gains(&logs, caller);
+                    RawExecOutcome {
+                        sim: SimOutcome {
+                            ok: true,
+                            engine: "revm".to_string(),
+                            gas_used: gas.tx_gas_used(),
+                            result_or_error: format!("0x{}", hex::encode(&data)),
+                            revert_data: None,
+                            revert_kind: None,
+                            revert_reason: None,
+                            transfers,
+                        },
+                        actor_eth_gain_wei: eth_gain,
+                        actor_token_wei_equiv: tok_wei,
+                        actor_token_transfers: tok_count,
+                    }
+                }
+                ExecutionResult::Revert { gas, output, .. } => {
+                    let hex_payload = format!("0x{}", hex::encode(&output));
+                    let decoded = decode_revert_bytes(&output);
+                    let msg = match &decoded {
+                        Some((kind, reason)) => format!("execution reverted ({kind}): {reason}"),
+                        None if output.is_empty() => "execution reverted".to_string(),
+                        None => format!(
+                            "execution reverted: {}",
+                            hex_payload.chars().take(66).collect::<String>()
+                        ),
+                    };
+                    RawExecOutcome {
+                        sim: SimOutcome {
+                            ok: false,
+                            engine: "revm".to_string(),
+                            gas_used: gas.tx_gas_used(),
+                            result_or_error: one_line_str(&msg),
+                            revert_data: if output.is_empty() {
+                                None
+                            } else {
+                                Some(hex_payload.chars().take(522).collect())
+                            },
+                            revert_kind: decoded.as_ref().map(|(k, _)| k.clone()),
+                            revert_reason: decoded.map(|(_, r)| r),
+                            transfers: Vec::new(),
+                        },
+                        actor_eth_gain_wei: 0,
+                        actor_token_wei_equiv: 0,
+                        actor_token_transfers: 0,
+                    }
+                }
+                ExecutionResult::Halt { reason, gas, .. } => RawExecOutcome {
+                    sim: SimOutcome {
+                        ok: false,
+                        engine: "revm".to_string(),
+                        gas_used: gas.tx_gas_used(),
+                        result_or_error: one_line_str(&format!("halted: {reason:?}")),
+                        revert_data: None,
+                        revert_kind: Some("halt".to_string()),
+                        revert_reason: Some(format!("{reason:?}")),
+                        transfers: Vec::new(),
+                    },
+                    actor_eth_gain_wei: 0,
+                    actor_token_wei_equiv: 0,
+                    actor_token_transfers: 0,
+                },
+            },
+            Err(evm_err) => RawExecOutcome {
                 sim: SimOutcome {
                     ok: false,
                     engine: "revm".to_string(),
                     gas_used: 0,
-                    result_or_error: format!("invalid tx env: {err:?}"),
+                    result_or_error: one_line_str(&format!("revm error: {evm_err}")),
                     revert_data: None,
                     revert_kind: None,
                     revert_reason: None,
@@ -389,101 +498,19 @@ async fn execute_revm_call(
                 actor_eth_gain_wei: 0,
                 actor_token_wei_equiv: 0,
                 actor_token_transfers: 0,
-            };
-        }
-    };
-
-    match evm.transact_async(tx_env).await {
-        Ok(exec) => match exec.result {
-            ExecutionResult::Success {
-                gas,
-                logs,
-                output,
-                ..
-            } => {
-                let data = match output {
-                    Output::Call(b) | Output::Create(b, _) => b,
-                };
-                let post_balance = exec
-                    .state
-                    .get(&caller)
-                    .map(|acc| acc.info.balance)
-                    .unwrap_or(pre_balance);
-                let eth_gain = if post_balance > pre_balance {
-                    u128::try_from(post_balance - pre_balance).unwrap_or(u128::MAX)
-                } else {
-                    0
-                };
-                let (transfers, tok_wei, tok_count) = parse_transfers_and_gains(&logs, caller);
-                RawExecOutcome {
-                    sim: SimOutcome {
-                        ok: true,
-                        engine: "revm".to_string(),
-                        gas_used: gas.tx_gas_used(),
-                        result_or_error: format!("0x{}", hex::encode(&data)),
-                        revert_data: None,
-                        revert_kind: None,
-                        revert_reason: None,
-                        transfers,
-                    },
-                    actor_eth_gain_wei: eth_gain,
-                    actor_token_wei_equiv: tok_wei,
-                    actor_token_transfers: tok_count,
-                }
-            }
-            ExecutionResult::Revert { gas, output, .. } => {
-                let hex_payload = format!("0x{}", hex::encode(&output));
-                let decoded = decode_revert_bytes(&output);
-                let msg = match &decoded {
-                    Some((kind, reason)) => format!("execution reverted ({kind}): {reason}"),
-                    None if output.is_empty() => "execution reverted".to_string(),
-                    None => format!(
-                        "execution reverted: {}",
-                        hex_payload.chars().take(66).collect::<String>()
-                    ),
-                };
-                RawExecOutcome {
-                    sim: SimOutcome {
-                        ok: false,
-                        engine: "revm".to_string(),
-                        gas_used: gas.tx_gas_used(),
-                        result_or_error: one_line_str(&msg),
-                        revert_data: if output.is_empty() {
-                            None
-                        } else {
-                            Some(hex_payload.chars().take(522).collect())
-                        },
-                        revert_kind: decoded.as_ref().map(|(k, _)| k.clone()),
-                        revert_reason: decoded.map(|(_, r)| r),
-                        transfers: Vec::new(),
-                    },
-                    actor_eth_gain_wei: 0,
-                    actor_token_wei_equiv: 0,
-                    actor_token_transfers: 0,
-                }
-            }
-            ExecutionResult::Halt { reason, gas, .. } => RawExecOutcome {
-                sim: SimOutcome {
-                    ok: false,
-                    engine: "revm".to_string(),
-                    gas_used: gas.tx_gas_used(),
-                    result_or_error: one_line_str(&format!("halted: {reason:?}")),
-                    revert_data: None,
-                    revert_kind: Some("halt".to_string()),
-                    revert_reason: Some(format!("{reason:?}")),
-                    transfers: Vec::new(),
-                },
-                actor_eth_gain_wei: 0,
-                actor_token_wei_equiv: 0,
-                actor_token_transfers: 0,
             },
-        },
-        Err(evm_err) => RawExecOutcome {
+        }
+    })
+    .await;
+
+    match joined {
+        Ok(outcome) => outcome,
+        Err(join_err) => RawExecOutcome {
             sim: SimOutcome {
                 ok: false,
                 engine: "revm".to_string(),
                 gas_used: 0,
-                result_or_error: one_line_str(&format!("revm error: {evm_err}")),
+                result_or_error: one_line_str(&format!("revm task join error: {join_err}")),
                 revert_data: None,
                 revert_kind: None,
                 revert_reason: None,
@@ -1010,7 +1037,7 @@ mod tests {
         hex::decode("60043560005414600d57600080fd5b6000808080476000545af100").unwrap()
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn detects_unguarded_extractable_claim_and_scores_profit() {
         let backend = Arc::new(InMemoryStateBackend::default());
         let target = address!("aaaa000000000000000000000000000000000001");
@@ -1064,7 +1091,7 @@ mod tests {
         assert!(net > 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn classifies_sender_protected_contract_accurately() {
         let backend = Arc::new(InMemoryStateBackend::default());
         let target = address!("aaaa000000000000000000000000000000000003");
@@ -1119,7 +1146,7 @@ mod tests {
         assert!(!record.decision.would_frontrun);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn distinguishes_beneficiary_locked_merkle_style_claim() {
         let backend = Arc::new(InMemoryStateBackend::default());
         let target = address!("aaaa000000000000000000000000000000000005");
