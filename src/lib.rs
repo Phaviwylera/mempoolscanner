@@ -2,6 +2,7 @@
 
 pub mod abi;
 pub mod config;
+pub mod exec;
 pub mod liquidation;
 pub mod pipeline;
 pub mod sim;
