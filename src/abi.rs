@@ -177,7 +177,7 @@ mod defs {
 }
 
 sol! {
-    error RevertError(string reason);
+    error Error(string reason);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1134,7 +1134,7 @@ mod tests {
     #[test]
     fn decodes_revert_error_and_panic() {
         use alloy::sol_types::SolError;
-        let encoded = RevertError {
+        let encoded = Error {
             reason: "already claimed".to_string(),
         }
         .abi_encode();

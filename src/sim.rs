@@ -1023,18 +1023,18 @@ mod tests {
     /// Minimal EVM runtime bytecode for a SENDER-PROTECTED `claim()`:
     /// Requires `caller == sload(0)` (authorized owner), else reverts; sends 1 ETH to caller.
     fn sender_protected_claim_bytecode() -> Vec<u8> {
-        // PUSH1 0x00 SLOAD CALLER EQ PUSH1 0x0b JUMPI PUSH1 0x00 DUP1 REVERT
+        // PUSH1 0x00 SLOAD CALLER EQ PUSH1 0x0c JUMPI PUSH1 0x00 DUP1 REVERT
         // JUMPDEST PUSH1 0x00 DUP1 DUP1 DUP1 SELFBALANCE CALLER GAS CALL STOP
-        hex::decode("6000543314600b57600080fd5b600080808047335af100").unwrap()
+        hex::decode("6000543314600c57600080fd5b600080808047335af100").unwrap()
     }
 
     /// Minimal EVM runtime bytecode for a BENEFICIARY-LOCKED `claim(address,uint256)`:
     /// Anyone may relay the call, BUT `calldataload(4)` MUST equal `sload(0)` (locked victim)
     /// and ETH is sent to `sload(0)` (the victim), never to `caller`!
     fn beneficiary_locked_claim_bytecode() -> Vec<u8> {
-        // PUSH1 0x04 CALLDATALOAD PUSH1 0x00 SLOAD EQ PUSH1 0x0d JUMPI PUSH1 0x00 DUP1 REVERT
+        // PUSH1 0x04 CALLDATALOAD PUSH1 0x00 SLOAD EQ PUSH1 0x0e JUMPI PUSH1 0x00 DUP1 REVERT
         // JUMPDEST PUSH1 0x00 DUP1 DUP1 DUP1 SELFBALANCE PUSH1 0x00 SLOAD GAS CALL STOP
-        hex::decode("60043560005414600d57600080fd5b6000808080476000545af100").unwrap()
+        hex::decode("60043560005414600e57600080fd5b6000808080476000545af100").unwrap()
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
