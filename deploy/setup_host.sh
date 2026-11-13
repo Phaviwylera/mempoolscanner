@@ -6,7 +6,7 @@ id -u mempolscan >/dev/null 2>&1 || useradd --system --create-home --home-dir /h
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y --no-install-recommends build-essential ca-certificates curl git jq python3 python3-venv python3-pip
+apt-get install -y --no-install-recommends build-essential ca-certificates curl git jq python3 python3-dev python3-venv python3-pip
 
 FOUNDRY_BIN=/home/mempolscan/.foundry/bin/anvil
 if [[ ! -x "$FOUNDRY_BIN" ]]; then
