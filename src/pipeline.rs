@@ -4,6 +4,7 @@
 
 use crate::abi::{decode_calldata, match_calldata, REGISTRY};
 use crate::config::Settings;
+use crate::liquidation::liquidation_watcher_loop;
 use crate::sim::{evaluate_transaction, HitRecord, ObservedTx, SimulationParams};
 use crate::state::{one_line_str, ForkMonitor, RpcStateBackend, StateBackend};
 use alloy::consensus::{BlockHeader, Transaction as ConsensusTx};
@@ -382,6 +383,20 @@ pub async fn run_scanner(settings: Settings) -> Result<()> {
         })
     };
 
+    let liq_handle = {
+        let log_path = settings.log_path.clone();
+        let provider = state_provider.clone();
+        let mon = monitor.clone();
+        let back = backend.clone();
+        let mut srx = shutdown_rx.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = liquidation_watcher_loop(log_path, provider, mon, back) => {}
+                _ = srx.changed() => {}
+            }
+        })
+    };
+
     info!(
         "Rust Revm scanner ready: watching {} selectors (max_lag={}, depth={}, poll={:.1}s, workers={})",
         REGISTRY.len(),
@@ -417,6 +432,7 @@ pub async fn run_scanner(settings: Settings) -> Result<()> {
     drop(record_tx);
     let _ = monitor_poller.await;
     let _ = reaper_handle.await;
+    let _ = liq_handle.await;
     let _ = writer_handle.await;
     info!("Shutdown complete");
     Ok(())

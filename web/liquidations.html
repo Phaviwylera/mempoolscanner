@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#07080d" />
+    <meta name="description" content="Read-only Aave V3 Ethereum Mainnet borrower health factor monitor and zero-capital flash-loan liquidation simulator." />
+    <title>Aave V3 Liquidation Observatory · Rust + Revm</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/liquidations.js" defer></script>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <a class="brand" href="#top" aria-label="Liquidation Observatory home">
+          <span class="brand-mark"><i></i><i></i><i></i></span>
+          <span class="brand-copy"><strong>LIQUIDATIONS</strong><small>AAVE V3 · ALLOY · REVM / 03</small></span>
+        </a>
+        <nav class="main-nav" aria-label="Liquidation navigation">
+          <a class="active" href="#simulator">Simulator <span>01</span></a>
+          <a href="#positions">Borrowers <span>02</span></a>
+          <a href="#events">Mainnet Events <span>03</span></a>
+          <a href="#lifecycle">Atomic Flow <span>04</span></a>
+        </nav>
+        <div class="top-status">
+          <a class="nav-liq-btn nav-back-btn" href="/"><span>←</span> MEMPOOL SCANNER</a>
+          <span class="chain-chip"><span class="eth-diamond">◆</span> AAVE V3 · ETHEREUM MAINNET</span>
+          <span id="liq-feed-status" class="feed-status"><i></i><b>SYNCING POOL</b></span>
+          <button id="liq-refresh-btn" class="icon-button" type="button" aria-label="Refresh Aave V3 positions" title="Refresh Aave V3 positions">↻</button>
+        </div>
+      </header>
+
+      <main id="top">
+        <div id="liq-status-bar" class="extractable-bar" data-active="false" role="region" aria-label="Live Aave V3 liquidation bounty status">
+          <div class="ext-bar-lead">
+            <span class="ext-bar-dot" aria-hidden="true"></span>
+            <span class="ext-bar-kicker">LIQUIDATABLE</span>
+            <strong id="liq-bar-open">0 OPEN</strong>
+          </div>
+          <div class="ext-bar-divider" aria-hidden="true"></div>
+          <div class="ext-bar-metric">
+            <span>EST. FLASH BOUNTY</span>
+            <strong id="liq-bar-bounty">₹0.00</strong>
+            <small id="liq-bar-net">NET ₹0.00 AFTER FEES</small>
+          </div>
+          <div class="ext-bar-metric">
+            <span>AT-RISK DEBT (HF &lt; 1.20)</span>
+            <strong id="liq-bar-atrisk">₹0.00</strong>
+            <small id="liq-bar-atrisk-sub">0 WATCHED POSITIONS</small>
+          </div>
+          <div class="ext-bar-divider" aria-hidden="true"></div>
+          <div class="ext-bar-metric">
+            <span>TRACKED AAVE V3 DEBT</span>
+            <strong id="liq-bar-debt">₹0.00</strong>
+            <small id="liq-bar-oracle">ETH ORACLE —</small>
+          </div>
+          <div class="ext-bar-right">
+            <span class="ext-bar-purged">FLASH-LOAN ATOMIC SIM · READ-ONLY</span>
+            <button id="liq-filter-btn" class="ext-bar-btn" type="button">FILTER: ALL BORROWERS</button>
+          </div>
+        </div>
+
+        <div id="liq-sync-banner" class="fork-banner" data-state="unknown" role="status" aria-live="polite">
+          <span class="fork-banner-mark" aria-hidden="true"></span>
+          <b id="liq-banner-state">AAVE V3 WATCHER: CONNECTING</b>
+          <span id="liq-banner-text">Enumerating active borrowers from Ethereum Mainnet Pool 0x8787…a4e2…</span>
+          <span id="liq-banner-meta" class="fork-banner-meta">HEAD —</span>
+        </div>
+
+        <section class="intro">
+          <div>
+            <div class="eyebrow"><span class="eyebrow-line"></span> AAVE V3 POOL · GETUSERACCOUNTDATA · REVM <span class="eyebrow-index">SOLVENCY WATCH / 2026</span></div>
+            <h1>Bad loans,<br /><em>tracked to the crossing.</em></h1>
+            <p class="intro-copy">Enumerates active Aave V3 Ethereum Mainnet borrowers, computes live Health Factors and exact ETH trigger prices,<br class="desktop-break" /> and models the 5-step zero-capital flash-loan liquidation bounty in INR (₹) — strictly read-only without signing or broadcasting.</p>
+          </div>
+          <div class="intro-badge"><span class="badge-orbit"><i></i></span><div><b>OBSERVATION MODE</b><small>READ-ONLY · NO KEYS · NO TX BROADCAST</small></div></div>
+        </section>
+
+        <section class="metric-row" aria-label="Live liquidation metrics">
+          <article class="metric-card metric-primary">
+            <div class="metric-label"><span>01</span> TRACKED BORROWERS <b class="spark spark-cyan"></b></div>
+            <strong id="liq-metric-tracked">—</strong>
+            <small id="liq-metric-tracked-sub">active Aave V3 loans <span class="metric-live"><i></i> MAINNET</span></small>
+          </article>
+          <article class="metric-card">
+            <div class="metric-label"><span>02</span> LOWEST HEALTH FACTOR <b class="metric-dot dot-pink"></b></div>
+            <strong id="liq-metric-lowest-hf">—</strong>
+            <small id="liq-metric-lowest-sub">liquidation triggers below 1.0000</small>
+          </article>
+          <article class="metric-card">
+            <div class="metric-label"><span>03</span> LIQUIDATABLE / AT-RISK <b class="metric-dot dot-green"></b></div>
+            <strong id="liq-metric-candidates">—</strong>
+            <small id="liq-metric-candidates-sub">HF &lt; 1.00 open · HF &lt; 1.20 watched</small>
+          </article>
+          <article class="metric-card metric-time">
+            <div class="metric-label"><span>04</span> AAVE ORACLE ETH <b class="spark spark-pink"></b></div>
+            <strong id="liq-metric-eth">—</strong>
+            <small id="liq-metric-eth-sub">live 8-decimal oracle &amp; INR rate</small>
+          </article>
+        </section>
+
+        <section id="simulator" class="workspace-grid">
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <div class="panel-kicker">ATOMIC SEQUENCE / 01</div>
+                <h2>Zero-capital flash-loan liquidation simulator</h2>
+              </div>
+              <div class="panel-meta">
+                <span class="live-tag"><i></i> 5-STEP ATOMIC TX</span>
+                <span id="sim-mode-label">PRESET / LIVE</span>
+              </div>
+            </div>
+
+            <div class="liq-sim-panel">
+              <div class="liq-preset-row">
+                <button id="sim-load-live-btn" class="liq-pill-btn" type="button" data-active="false">LOAD LOWEST-HF MAINNET BORROWER</button>
+                <button id="sim-load-alice-btn" class="liq-pill-btn pink" type="button" data-active="true">ALICE EXAMPLE (5 ETH / 6,000 USDC)</button>
+                <button id="sim-cf-btn" class="liq-pill-btn" type="button" data-active="false">CLOSE FACTOR: 50% (AAVE STD)</button>
+              </div>
+
+              <div class="liq-pos-summary">
+                <div>
+                  <span>TARGET POSITION</span>
+                  <strong id="sim-target-label">Alice (Reference)</strong>
+                  <small id="sim-target-lt">LIQ. THRESHOLD 80.0%</small>
+                </div>
+                <div>
+                  <span>COLLATERAL VALUE</span>
+                  <strong id="sim-col-inr">₹—</strong>
+                  <small id="sim-col-usd">$—</small>
+                </div>
+                <div>
+                  <span>BORROWED DEBT</span>
+                  <strong id="sim-debt-inr">₹—</strong>
+                  <small id="sim-debt-usd">$—</small>
+                </div>
+                <div>
+                  <span>SIMULATED HEALTH FACTOR</span>
+                  <strong id="sim-hf-val">—</strong>
+                  <small id="sim-trigger-note">TRIGGER —</small>
+                </div>
+              </div>
+
+              <div class="liq-shock-box">
+                <div class="liq-shock-head">
+                  <span>COLLATERAL / ETH PRICE SHOCK STRESS TEST</span>
+                  <strong id="sim-shock-readout">0% (ETH $2,000.00)</strong>
+                </div>
+                <input id="sim-shock-range" class="liq-range" type="range" min="-45" max="20" step="1" value="-30" aria-label="Collateral price change percentage" />
+                <div class="liq-shock-Quick">
+                  <button class="liq-pill-btn sim-shock-preset" type="button" data-shock="0">0% CURRENT</button>
+                  <button class="liq-pill-btn sim-shock-preset" type="button" data-shock="-10">-10% DIP</button>
+                  <button class="liq-pill-btn sim-shock-preset" type="button" data-shock="-25">-25% (ALICE HF 1.00)</button>
+                  <button class="liq-pill-btn pink sim-shock-preset" type="button" data-shock="-30">-30% (ALICE $1,400 · HF 0.93)</button>
+                </div>
+              </div>
+
+              <div class="liq-steps" aria-live="polite">
+                <div class="liq-step">
+                  <span class="liq-step-num">01</span>
+                  <div class="liq-step-body">
+                    <b>Flash-borrow debt asset from Aave V3 Pool</b>
+                    <small id="sim-step1-desc">No upfront capital required — borrowed and repaid inside one transaction.</small>
+                  </div>
+                  <div class="liq-step-val">
+                    <span id="sim-step1-inr">₹0.00</span>
+                    <small id="sim-step1-usd">$0.00 principal</small>
+                  </div>
+                </div>
+
+                <div class="liq-step">
+                  <span class="liq-step-num">02</span>
+                  <div class="liq-step-body">
+                    <b>Call Pool.liquidationCall(borrower, collateral, debt, debtToCover)</b>
+                    <small id="sim-step2-desc">Repays up to close-factor cap of debt and seizes collateral + 5.0% liquidation bonus.</small>
+                  </div>
+                  <div class="liq-step-val">
+                    <span id="sim-step2-inr">₹0.00</span>
+                    <small id="sim-step2-usd">$0.00 seized (+5% bonus)</small>
+                  </div>
+                </div>
+
+                <div class="liq-step">
+                  <span class="liq-step-num">03</span>
+                  <div class="liq-step-body">
+                    <b>Swap seized collateral → debt token on Uniswap V3</b>
+                    <small id="sim-step3-desc">Converts seized collateral into repayment currency (models 0.10% DEX fee + slippage).</small>
+                  </div>
+                  <div class="liq-step-val">
+                    <span id="sim-step3-inr">₹0.00</span>
+                    <small id="sim-step3-usd">-$0.00 DEX swap cost</small>
+                  </div>
+                </div>
+
+                <div class="liq-step">
+                  <span class="liq-step-num">04</span>
+                  <div class="liq-step-body">
+                    <b>Repay Aave V3 flash loan + 0.05% premium (5 bps)</b>
+                    <small id="sim-step4-desc">If swap proceeds cannot cover principal + fee, the entire transaction reverts safely.</small>
+                  </div>
+                  <div class="liq-step-val">
+                    <span id="sim-step4-inr">₹0.00</span>
+                    <small id="sim-step4-usd">$0.00 flash fee</small>
+                  </div>
+                </div>
+
+                <div id="sim-step5-row" class="liq-step final-step" data-profitable="false">
+                  <span class="liq-step-num">05</span>
+                  <div class="liq-step-body">
+                    <b id="sim-step5-title">Net residual bounty after gas</b>
+                    <small id="sim-step5-desc">Residual profit minus 380k mainnet gas. Read-only simulation — never broadcast.</small>
+                  </div>
+                  <div class="liq-step-val">
+                    <span id="sim-step5-inr">₹0.00</span>
+                    <small id="sim-step5-usd">$0.00 net</small>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <aside class="side-stack">
+            <article class="panel">
+              <div class="panel-head compact">
+                <div>
+                  <div class="panel-kicker">ON-CHAIN INSPECTOR / 02</div>
+                  <h2>Check any borrower wallet</h2>
+                </div>
+                <span class="status-emblem">⌕</span>
+              </div>
+              <div class="liq-inspect-box">
+                <form id="liq-inspect-form" class="liq-inspect-form">
+                  <input id="liq-inspect-input" class="liq-input" type="text" placeholder="0x... Ethereum wallet address" spellcheck="false" autocomplete="off" aria-label="Ethereum borrower wallet address" />
+                  <button id="liq-inspect-btn" class="ext-bar-btn" type="submit">INSPECT</button>
+                </form>
+                <div id="liq-inspect-output" class="liq-inspect-result">
+                  Paste any Ethereum address to call <code>AaveV3Pool.getUserAccountData(user)</code> live on Mainnet and load its collateral, debt, and liquidation price into the simulator.
+                </div>
+              </div>
+            </article>
+
+            <article class="panel status-panel">
+              <div class="panel-head compact">
+                <div>
+                  <div class="panel-kicker">PROTOCOL PARAMS / 03</div>
+                  <h2>Health factor &amp; engine</h2>
+                </div>
+                <span class="status-emblem">◉</span>
+              </div>
+              <div class="liq-formula-code">
+                HF = (Collateral × LiqThreshold) ÷ Debt<br />
+                HF &lt; 1.0000 ⇒ Liquidatable (5%–10% Bounty)
+              </div>
+              <div class="status-line">
+                <span class="status-symbol good">◆</span>
+                <div><b>Aave V3 Mainnet Pool</b><small id="liq-pool-addr">0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2</small></div>
+                <span class="state-pill">V3 CORE</span>
+              </div>
+              <div class="status-line">
+                <span class="status-symbol violet">⌁</span>
+                <div><b>In-process Revm verifier</b><small id="liq-engine-sub">Verifying lowest-HF borrower state</small></div>
+                <span class="state-pill ready">READ-ONLY</span>
+              </div>
+              <p class="tiny-note">Flash-loan fee: 0.05% (5 bps) · Close factor: 50% (100% below HF 0.95) · No keys or relay execution.</p>
+            </article>
+          </aside>
+        </section>
+
+        <section id="positions" class="panel activity-panel">
+          <div class="panel-head activity-head">
+            <div>
+              <div class="panel-kicker">ENUMERATED BORROWERS / 04</div>
+              <h2>Tracked Aave V3 positions <span id="liq-pos-count" class="count-chip">0</span></h2>
+            </div>
+            <div class="activity-tools">
+              <span id="liq-updated-at">UPDATED —</span>
+              <button id="liq-table-filter-btn" type="button" class="filter-chip active-filter">ALL BORROWERS <span>⌄</span></button>
+            </div>
+          </div>
+          <div class="table-scroll">
+            <table class="liq-table">
+              <thead>
+                <tr>
+                  <th>BORROWER / RESERVE</th>
+                  <th>HEALTH FACTOR</th>
+                  <th>COLLATERAL (INR)</th>
+                  <th>DEBT (INR)</th>
+                  <th>LIQ. THRESHOLD</th>
+                  <th>ETH TRIGGER / DROP</th>
+                  <th>DEBT TO COVER (50%)</th>
+                  <th>EST. FLASH BOUNTY (INR)</th>
+                  <th>STATUS / SIMULATE</th>
+                </tr>
+              </thead>
+              <tbody id="liq-positions-body">
+                <tr class="empty-row">
+                  <td colspan="9">
+                    <span class="empty-mark">⌁</span>
+                    <b>Enumerating active Aave V3 borrowers on Ethereum Mainnet</b>
+                    <small>Scanning Borrow, Repay, and LiquidationCall logs on 0x8787…a4e2 and calling getUserAccountData(user).</small>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="table-foot">
+            <span><i class="legend-dot cyan"></i> <span id="liq-shown-count">0</span> BORROWERS SHOWN (SORTED BY LOWEST HF)</span>
+            <span>SNAPSHOT · <code>logs/liquidations.json</code></span>
+            <span class="table-foot-right">POLLING EVERY 8 SEC</span>
+          </div>
+        </section>
+
+        <section id="events" class="panel activity-panel">
+          <div class="panel-head activity-head">
+            <div>
+              <div class="panel-kicker">MAINNET HISTORY / 05</div>
+              <h2>Recent on-chain LiquidationCall events <span id="liq-events-count" class="count-chip">0</span></h2>
+            </div>
+            <div class="activity-tools">
+              <span id="liq-events-range">LAST ~6,000 BLOCKS</span>
+            </div>
+          </div>
+          <div class="table-scroll">
+            <table class="liq-table">
+              <thead>
+                <tr>
+                  <th>BLOCK</th>
+                  <th>TRANSACTION</th>
+                  <th>BORROWER LIQUIDATED</th>
+                  <th>LIQUIDATOR CONTRACT</th>
+                  <th>DEBT REPAID</th>
+                  <th>COLLATERAL SEIZED</th>
+                  <th>EST. DEBT (INR)</th>
+                </tr>
+              </thead>
+              <tbody id="liq-events-body">
+                <tr class="empty-row">
+                  <td colspan="7">
+                    <span class="empty-mark">◆</span>
+                    <b>No LiquidationCall logs in the scanned block window yet</b>
+                    <small>When an Aave V3 Mainnet loan crosses HF &lt; 1.0 and is liquidated on-chain, the event appears here automatically.</small>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="lifecycle" class="method-strip" aria-label="Five-stage liquidation observation pipeline">
+          <div><span class="method-number">01</span><b>ENUMERATE</b><small>Aave V3 Borrow &amp; Repay logs</small></div><span class="method-arrow">→</span>
+          <div><span class="method-number">02</span><b>HEALTH FACTOR</b><small>Pool.getUserAccountData(user)</small></div><span class="method-arrow">→</span>
+          <div><span class="method-number">03</span><b>CROSSING WATCH</b><small>Compute ETH price for HF &lt; 1.0</small></div><span class="method-arrow">→</span>
+          <div><span class="method-number">04</span><b>FLASH SEQUENCE</b><small>50% close · 5% bonus · 0.05% fee</small></div><span class="method-arrow">→</span>
+          <div><span class="method-number">05</span><b>REVM VERIFY</b><small>In-memory check · INR net score</small></div>
+          <div class="method-stamp"><strong>READ ONLY</strong><span>NO TX BROADCAST</span></div>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <a class="footer-brand" href="/">← MEMPOOL OBSERVATORY <span>/ AAVE V3 LIQUIDATIONS</span></a>
+        <span>SEPARATE MODULE · DOES NOT MODIFY MEMPOOL SCANNER</span>
+        <span>OBSERVATION ONLY <i></i></span>
+      </footer>
+    </div>
+  </body>
+</html>
