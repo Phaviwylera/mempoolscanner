@@ -1,6 +1,6 @@
 //! Runtime configuration loaded from `.env` and environment variables.
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use std::env;
 use std::path::PathBuf;
 use tracing::warn;
@@ -23,7 +23,7 @@ impl Settings {
     pub fn from_env() -> Result<Self> {
         let _ = dotenvy::dotenv();
 
-        let ws_rpc = read_trimmed("WS_RPC");
+        let mut ws_rpc = read_trimmed("WS_RPC");
         let ipc_rpc = non_empty(read_trimmed("IPC_RPC"));
         let http_rpc = non_empty(read_trimmed("HTTP_RPC"));
         let anvil_rpc = non_empty(read_trimmed("ANVIL_RPC"));
@@ -33,26 +33,27 @@ impl Settings {
         );
 
         if ws_rpc.is_empty() && ipc_rpc.is_none() {
-            bail!("WS_RPC (or IPC_RPC) must be set in the environment");
+            warn!("WS_RPC and IPC_RPC unset; defaulting to wss://ethereum-rpc.publicnode.com");
+            ws_rpc = "wss://ethereum-rpc.publicnode.com".to_string();
         }
 
+        let derived_http = ws_to_http(&ws_rpc);
+
         // In-process Revm queries state directly from HTTP_RPC (lag = 0 against upstream)
-        // when available, falling back to ANVIL_RPC for local-fork development.
+        // when available, falling back to WS-derived HTTPS before local ANVIL_RPC.
         let state_rpc = if prefer_anvil {
             anvil_rpc
                 .clone()
                 .or_else(|| http_rpc.clone())
-                .unwrap_or_default()
+                .or(derived_http)
+                .unwrap_or_else(|| "https://ethereum-rpc.publicnode.com".to_string())
         } else {
             http_rpc
                 .clone()
+                .or(derived_http)
                 .or_else(|| anvil_rpc.clone())
-                .unwrap_or_default()
+                .unwrap_or_else(|| "https://ethereum-rpc.publicnode.com".to_string())
         };
-
-        if state_rpc.is_empty() {
-            bail!("HTTP_RPC or ANVIL_RPC must be set in the environment");
-        }
 
         let log_raw = non_empty(read_trimmed("LOG_PATH"))
             .or_else(|| non_empty(read_trimmed("MEMPOLSCAN_LOG_PATH")))
@@ -74,7 +75,25 @@ impl Settings {
 }
 
 fn read_trimmed(name: &str) -> String {
-    env::var(name).unwrap_or_default().trim().to_string()
+    let raw = env::var(name).unwrap_or_default();
+    let trimmed = raw.trim();
+    let unquoted = if (trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2)
+        || (trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2)
+    {
+        &trimmed[1..trimmed.len() - 1]
+    } else {
+        trimmed
+    };
+    unquoted.trim().to_string()
+}
+
+fn ws_to_http(ws: &str) -> Option<String> {
+    if let Some(rest) = ws.strip_prefix("wss://") {
+        Some(format!("https://{rest}"))
+    } else {
+        ws.strip_prefix("ws://")
+            .map(|rest| format!("http://{rest}"))
+    }
 }
 
 fn non_empty(val: String) -> Option<String> {

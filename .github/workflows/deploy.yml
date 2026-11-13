@@ -101,7 +101,7 @@ jobs:
             err_out="$(echo "$invocation" | jq -r '.StandardErrorContent')"
             std_out="$(echo "$invocation" | jq -r '.StandardOutputContent')"
             echo "$err_out" >&2
-            python3 -c 'import sys; [print("::error::"+l[:350]) for l in sys.stdin.read().splitlines()[-20:] if l.strip()]' <<<"${std_out}"$'\n'"${err_out}"
+            STD_OUT="$std_out" ERR_OUT="$err_out" python3 -c 'import os; so=[x.strip() for x in os.environ["STD_OUT"].splitlines() if x.strip()][-10:]; eo=[x.strip() for x in os.environ["ERR_OUT"].splitlines() if x.strip()][-10:]; print("::error::STDOUT_TAIL: "+" | ".join(so)[:700]); print("::error::STDERR_TAIL: "+" | ".join(eo)[:700])'
             exit 1
           fi
 
@@ -130,6 +130,6 @@ jobs:
             err_out="$(echo "$invocation" | jq -r '.StandardErrorContent')"
             std_out="$(echo "$invocation" | jq -r '.StandardOutputContent')"
             echo "$err_out" >&2
-            python3 -c 'import sys; [print("::error::"+l[:350]) for l in sys.stdin.read().splitlines()[-20:] if l.strip()]' <<<"${std_out}"$'\n'"${err_out}"
+            STD_OUT="$std_out" ERR_OUT="$err_out" python3 -c 'import os; so=[x.strip() for x in os.environ["STD_OUT"].splitlines() if x.strip()][-10:]; eo=[x.strip() for x in os.environ["ERR_OUT"].splitlines() if x.strip()][-10:]; print("::error::STDOUT_TAIL: "+" | ".join(so)[:700]); print("::error::STDERR_TAIL: "+" | ".join(eo)[:700])'
             exit 1
           fi

@@ -420,6 +420,95 @@ function renderTable() {
   }
 }
 
+function formatUsdFromWei(weiStr, ethUsd = 3000) {
+  try {
+    const raw = String(weiStr ?? "0").trim();
+    if (!raw || raw.startsWith("-")) return "≈ $0.00";
+    const wei = BigInt(raw);
+    if (wei <= 0n) return "≈ $0.00";
+    // Compute cents with BigInt precision: wei * (ethUsd * 100) / 1e18
+    const cents = (wei * BigInt(Math.round(ethUsd * 100))) / (10n ** 18n);
+    const dollars = Number(cents) / 100;
+    return `≈ $${dollars.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  } catch {
+    return "≈ $0.00";
+  }
+}
+
+function syncFilterButtons() {
+  const filterChip = $("#clear-filter");
+  if (filterChip && filterChip.firstChild) {
+    const label = FILTER_LABELS[state.filter] || "ALL MATCHES";
+    filterChip.firstChild.textContent = `${label} `;
+  }
+  const topBtn = $("#ext-bar-filter-btn");
+  if (topBtn) {
+    const active = state.filter === "extractable";
+    topBtn.dataset.filtering = active ? "true" : "false";
+    topBtn.textContent = active ? "SHOW ALL MATCHES" : "VIEW EXTRACTABLE";
+  }
+}
+
+function renderExtractableBar() {
+  const bar = $("#extractable-bar");
+  if (!bar) return;
+
+  const qExt = state.quality && state.quality.extractable ? state.quality.extractable : null;
+  const openHits = state.hits.filter((h) => !h.closed && decisionStatus(h) === "extractable");
+
+  let openCount = openHits.length;
+  let grossWei = 0n;
+  let netWei = 0n;
+  let tokenGains = 0;
+
+  for (const h of openHits) {
+    try {
+      const g = BigInt(String(h.decision?.gross_value_wei ?? "0").trim() || "0");
+      if (g > 0n) grossWei += g;
+    } catch {}
+    try {
+      const nRaw = String(h.decision?.net_profit_wei ?? "0").trim();
+      if (!nRaw.startsWith("-")) {
+        const n = BigInt(nRaw || "0");
+        if (n > 0n) netWei += n;
+      }
+    } catch {}
+    tokenGains += Number(h.decision?.probe_token_gains || 0);
+  }
+
+  if (qExt && Number(qExt.open_count) >= 0 && state.hits.length === 0) {
+    openCount = Number(qExt.open_count) || 0;
+    try { grossWei = BigInt(qExt.total_gross_wei || "0"); } catch {}
+    try { netWei = BigInt(qExt.total_net_wei || "0"); } catch {}
+    tokenGains = Number(qExt.token_transfers || 0);
+  }
+
+  const closedRemoved = qExt ? Number(qExt.closed_removed || 0) : 0;
+
+  bar.dataset.active = openCount > 0 ? "true" : "false";
+  $("#ext-bar-count").textContent = `${openCount.toLocaleString()} OPEN`;
+  $("#ext-bar-total").textContent = formatWei(grossWei.toString(), 18, 5, " ETH");
+  $("#ext-bar-usd").textContent = formatUsdFromWei(grossWei.toString());
+  $("#ext-bar-net").textContent = netWei > 0n ? `+${formatWei(netWei.toString(), 18, 5, " ETH")}` : "0 ETH";
+
+  const tokenNote = $("#ext-bar-tokens");
+  if (openCount === 0) {
+    tokenNote.textContent = "0 LIVE OPPORTUNITIES";
+  } else if (tokenGains > 0) {
+    tokenNote.textContent = `${tokenGains} ERC-20 TRANSFER${tokenGains === 1 ? "" : "S"} CAPTURED`;
+  } else {
+    tokenNote.textContent = `${openCount} UNGUARDED CALL${openCount === 1 ? "" : "S"} PENDING`;
+  }
+
+  const purgedEl = $("#ext-bar-purged");
+  if (purgedEl) {
+    purgedEl.textContent = closedRemoved > 0
+      ? `${closedRemoved.toLocaleString()} CLOSED / USER-SETTLED REMOVED`
+      : "CLOSED / USER-SETTLED TXS AUTO-REMOVED";
+  }
+  syncFilterButtons();
+}
+
 function render() {
   const total = state.hits.length;
   const success = state.hits.filter((hit) => Boolean(hit.sim?.ok)).length;
@@ -430,12 +519,13 @@ function render() {
   $("#metric-ok").textContent = success.toLocaleString();
   $("#metric-extractable").textContent = extractable.toLocaleString();
   $("#metric-extractable-sub").textContent = wouldFrontrun
-    ? `${wouldFrontrun} profitable after gas & 90% bribe`
-    : "caller & recipient substitution probes";
+    ? `${wouldFrontrun} positive net value in replay`
+    : "closed & user-locked txs auto-removed";
 
   const latest = state.hits[0];
   $("#metric-last").textContent = latest ? relativeTime(latest.ts) : "—";
   $("#metric-last-sub").textContent = latest ? `${latest.name || "selector"} · ${shortHash(latest.hash)}` : "Waiting for a selector match";
+  renderExtractableBar();
   renderLatest(latest);
   renderTable();
 }
@@ -448,6 +538,7 @@ async function refreshQuality() {
   } catch {
     state.quality = null;
   }
+  renderExtractableBar();
   renderBanner(state.quality);
   renderRollup(state.quality);
   const latest = state.hits[0];
@@ -460,7 +551,7 @@ async function refresh() {
     if (!response.ok) throw new Error(`feed returned ${response.status}`);
     const payload = await response.json();
     if (!Array.isArray(payload.hits)) throw new Error("invalid feed response");
-    state.hits = payload.hits;
+    state.hits = payload.hits.filter((h) => !h.closed && decisionStatus(h) !== "beneficiary_locked");
     setOnline(true);
     $("#updated-at").textContent = `UPDATED ${new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" })} UTC`;
     render();
@@ -472,14 +563,26 @@ async function refresh() {
 }
 
 $("#refresh-button").addEventListener("click", refresh);
-$("#clear-filter").addEventListener("click", (event) => {
+$("#clear-filter").addEventListener("click", () => {
   const nextIdx = (FILTER_CYCLE.indexOf(state.filter) + 1) % FILTER_CYCLE.length;
   state.filter = FILTER_CYCLE[nextIdx];
-  const label = FILTER_LABELS[state.filter] || "ALL MATCHES";
-  event.currentTarget.firstChild.textContent = `${label} `;
+  syncFilterButtons();
   renderTable();
   refreshQuality();
 });
+const topExtBtn = $("#ext-bar-filter-btn");
+if (topExtBtn) {
+  topExtBtn.addEventListener("click", () => {
+    state.filter = state.filter === "extractable" ? "all" : "extractable";
+    syncFilterButtons();
+    renderTable();
+    refreshQuality();
+    const act = $("#activity");
+    if (act && state.filter === "extractable") {
+      act.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  });
+}
 
 function startField() {
   const canvas = $("#field-canvas");

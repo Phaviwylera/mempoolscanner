@@ -18,12 +18,21 @@ UNIT="${MEMPOLSCAN_UNIT:-mempolscan.service}"
 QUALITY_URL="${MEMPOLSCAN_QUALITY_URL:-http://127.0.0.1/api/quality?limit=1}"
 DEADLINE="${1:-${MEMPOLSCAN_HITS_DEADLINE:-180}}"
 LOG="$ROOT/logs/hits.jsonl"
+META="$ROOT/logs/scanner_meta.json"
 SKIP_SERVICE="${MEMPOLSCAN_SKIP_SERVICE_CHECK:-0}"
 
 record_count() {
   if [[ -f "$LOG" ]]; then
     # grep -c prints 0 and exits 1 when there is nothing to count.
     grep -c . "$LOG" || true
+  else
+    echo 0
+  fi
+}
+
+observed_total() {
+  if [[ -f "$META" ]]; then
+    jq -r '.total_observed // 0' "$META" 2>/dev/null || echo 0
   else
     echo 0
   fi
@@ -77,13 +86,16 @@ if ! service_active; then
 fi
 
 baseline="$(record_count)"
-echo "records before waiting: $baseline"
+baseline_obs="$(observed_total)"
+echo "records before waiting: active=${baseline}, lifetime_observed=${baseline_obs}"
 echo "== waiting up to ${DEADLINE}s for a new observation"
 deadline=$((SECONDS + DEADLINE))
 count="$baseline"
+obs="$baseline_obs"
 while ((SECONDS < deadline)); do
   count="$(record_count)"
-  if ((count > baseline)); then
+  obs="$(observed_total)"
+  if ((count > baseline || obs > baseline_obs)); then
     break
   fi
   if ! service_active; then
@@ -94,13 +106,15 @@ while ((SECONDS < deadline)); do
   sleep 5
 done
 
-if ((count <= baseline)); then
-  echo "FAILED: no new observation in ${DEADLINE}s (record count stayed at ${baseline})" >&2
+if ((count <= baseline && obs <= baseline_obs)); then
+  echo "FAILED: no new observation in ${DEADLINE}s (active=${count}, lifetime_observed=${obs})" >&2
   curl --silent --show-error --max-time 10 "$QUALITY_URL" | jq -c '.banner' >&2 || true
   dump_service
   exit 1
 fi
 
-echo "new observation recorded: ${baseline} -> ${count}"
-tail -n 1 "$LOG" | jq -c '{label, ts, fork: (.fork // {}), sim: (.sim // {})}' || true
+echo "new observation recorded: active ${baseline}->${count}, lifetime ${baseline_obs}->${obs}"
+if [[ -f "$LOG" ]] && [[ -s "$LOG" ]]; then
+  tail -n 1 "$LOG" | jq -c '{label, ts, fork: (.fork // {}), sim: (.sim // {})}' || true
+fi
 echo "VERIFY OK"
