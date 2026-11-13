@@ -375,9 +375,43 @@ class PipelineSummaryTests(unittest.TestCase):
         self.assertEqual(bar["profitable_count"], 2)
         self.assertEqual(bar["total_gross_wei"], "1750000000000000000")
         self.assertEqual(bar["total_net_wei"], "155000000000000000")
+        self.assertEqual(bar["currency"], "INR")
         self.assertEqual(bar["token_transfers"], 1)
         self.assertEqual(bar["closed_removed"], 7)
         self.assertEqual(bar["total_observed"], 25)
+
+    def test_inr_conversion_and_indian_grouping(self) -> None:
+        records = [
+            {
+                "name": "claim",
+                "hash": "0x01",
+                "decision": {
+                    "status": "extractable",
+                    "would_frontrun": True,
+                    "gross_value_wei": "1750000000000000000",  # 1.75 ETH * ₹260,000 = ₹4,55,000.00
+                    "net_profit_wei": "155000000000000000",  # 0.155 ETH * ₹260,000 = +₹40,300.00
+                    "probe_token_gains": 1,
+                },
+                "label": "candidate:claim",
+            }
+        ]
+        res = hits_api.summarise_quality(
+            records,
+            max_lag=MAX_LAG,
+            poll_seconds=POLL_SECONDS,
+            now=NOW,
+            eth_inr=260000.0,
+            rate_source="coinbase",
+        )
+        self.assertEqual(res["fx"], {"currency": "INR", "eth_inr": 260000.0, "source": "coinbase"})
+        self.assertEqual(res["extractable"]["total_gross_inr"], "₹4,55,000.00")
+        self.assertEqual(res["extractable"]["total_net_inr"], "+₹40,300.00")
+
+        empty_res = hits_api.summarise_quality(
+            [], max_lag=MAX_LAG, poll_seconds=POLL_SECONDS, now=NOW, eth_inr=260000.0
+        )
+        self.assertEqual(empty_res["extractable"]["total_gross_inr"], "₹0.00")
+        self.assertEqual(empty_res["extractable"]["total_net_inr"], "₹0.00")
 
 
 if __name__ == "__main__":
