@@ -26,10 +26,10 @@ Install Foundry and start an Ethereum mainnet fork in a separate terminal:
 ```bash
 curl -L https://foundry.paradigm.xyz | bash && foundryup
 set -a; source .env; set +a
-anvil --fork-url "$HTTP_RPC" (Anvil defaults to the latest block) --port 8545
+anvil --fork-url "$HTTP_RPC" --port 8545
 ```
 
-Start the monitor from the repository directory:
+Anvil follows the latest available block by default when no fork block is specified.\n\nStart the monitor from the repository directory:
 
 ```bash
 source venv/bin/activate
@@ -54,7 +54,7 @@ The built-in patterns cover common `claim`, `withdraw`, Uniswap V2/V3 swap, and 
 
 Press Ctrl-C. The monitor attempts to unsubscribe, flush queued JSONL records, and disconnect both RPC providers.
 
-## Responsible use
+## Public dashboard\n\nThe Ohio EC2 deployment serves the read-only dashboard at `http://<instance-public-ip>/`. It polls the recent-observation endpoint every five seconds; that endpoint reads the latest log entries and exposes no write or transaction-broadcast operation. Each push to `main` is deployed to the instance through GitHub Actions and AWS Systems Manager.\n\n## Responsible use
 
 Use only for contracts and bug-bounty programs you are authorized to test. Findings on third-party contracts should go through coordinated disclosure using the project's security contact, Immunefi, or SEAL 911. Do not take on-chain action based on this monitor's output.
 
