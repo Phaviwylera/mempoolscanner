@@ -25,6 +25,8 @@ use tracing::{debug, error, info, warn};
 const MAX_LOG_BYTES: u64 = 50 * 1024 * 1024; // 50 MB rotation threshold
 
 pub async fn run_scanner(settings: Settings) -> Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let state_provider = ProviderBuilder::new()
         .connect(&settings.state_rpc)
         .await?
@@ -118,7 +120,7 @@ async fn ingestion_supervisor(
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     let sim_sem = Arc::new(Semaphore::new(settings.worker_concurrency));
-    let fetch_sem = Arc::new(Semaphore::new(settings.worker_concurrency * 2));
+    let fetch_sem = Arc::new(Semaphore::new((settings.worker_concurrency * 2).clamp(8, 24)));
     let sim_params = Arc::new(SimulationParams {
         max_lag: settings.max_lag,
         depth: settings.depth,
@@ -126,6 +128,7 @@ async fn ingestion_supervisor(
     });
 
     let mut attempt: u32 = 0;
+    let mut prefer_full_tx = true;
     loop {
         if *shutdown_rx.borrow() {
             return Ok(());
@@ -150,24 +153,87 @@ async fn ingestion_supervisor(
             }
         }
 
-        // Prefer full pending transactions (`eth_subscribe("newPendingTransactions", true)`)
-        // for 0-hop ingestion; fall back automatically to hash stream + concurrent fetch.
-        match current_ws.subscribe_full_pending_transactions().await {
+        if prefer_full_tx {
+            match current_ws.subscribe_full_pending_transactions().await {
+                Ok(sub) => {
+                    info!("Subscribed to full pending transaction stream (0-hop mode)");
+                    let mut stream = sub.into_stream();
+                    let first = tokio::select! {
+                        res = tokio::time::timeout(Duration::from_secs(12), stream.next()) => Some(res),
+                        _ = shutdown_rx.changed() => None,
+                    };
+                    let Some(first_res) = first else {
+                        return Ok(());
+                    };
+                    match first_res {
+                        Ok(Some(first_tx)) => {
+                            attempt = 1;
+                            dispatch_full_tx(
+                                first_tx,
+                                0,
+                                "ws_full",
+                                &sim_sem,
+                                &monitor,
+                                &backend,
+                                &sim_params,
+                                &record_tx,
+                            );
+                            loop {
+                                tokio::select! {
+                                    maybe_tx = stream.next() => {
+                                        let Some(tx) = maybe_tx else {
+                                            warn!("Full pending transaction stream closed");
+                                            break;
+                                        };
+                                        dispatch_full_tx(
+                                            tx,
+                                            0,
+                                            "ws_full",
+                                            &sim_sem,
+                                            &monitor,
+                                            &backend,
+                                            &sim_params,
+                                            &record_tx,
+                                        );
+                                    }
+                                    _ = shutdown_rx.changed() => return Ok(()),
+                                }
+                            }
+                            continue;
+                        }
+                        Ok(None) | Err(_) => {
+                            info!("Full pending stream yielded no items within 12s; falling back to hash subscription");
+                            prefer_full_tx = false;
+                        }
+                    }
+                }
+                Err(full_err) => {
+                    debug!(
+                        "Full pending subscription unsupported ({}); using hash subscription",
+                        one_line_str(&full_err.to_string())
+                    );
+                    prefer_full_tx = false;
+                }
+            }
+        }
+
+        match current_ws.subscribe_pending_transactions().await {
             Ok(sub) => {
                 attempt = 1;
-                info!("Subscribed to full pending transaction stream (0-hop mode)");
+                info!("Subscribed to pending transaction hashes (concurrent fetch mode)");
                 let mut stream = sub.into_stream();
                 loop {
                     tokio::select! {
-                        maybe_tx = stream.next() => {
-                            let Some(tx) = maybe_tx else {
-                                warn!("Full pending transaction stream closed");
+                        maybe_hash = stream.next() => {
+                            let Some(tx_hash) = maybe_hash else {
+                                warn!("Pending hash stream closed");
                                 break;
                             };
-                            dispatch_full_tx(
-                                tx,
-                                0,
-                                "ws_full",
+                            dispatch_hash_tx(
+                                tx_hash,
+                                current_ws.clone(),
+                                http_fallback.clone(),
+                                &fetch_sem,
                                 &sim_sem,
                                 &monitor,
                                 &backend,
@@ -179,47 +245,12 @@ async fn ingestion_supervisor(
                     }
                 }
             }
-            Err(full_err) => {
-                debug!(
-                    "Full pending subscription unsupported ({}); using hash subscription",
-                    one_line_str(&full_err.to_string())
+            Err(hash_err) => {
+                warn!(
+                    "Pending hash subscription failed: {}",
+                    one_line_str(&hash_err.to_string())
                 );
-                match current_ws.subscribe_pending_transactions().await {
-                    Ok(sub) => {
-                        attempt = 1;
-                        info!("Subscribed to pending transaction hashes (concurrent fetch mode)");
-                        let mut stream = sub.into_stream();
-                        loop {
-                            tokio::select! {
-                                maybe_hash = stream.next() => {
-                                    let Some(tx_hash) = maybe_hash else {
-                                        warn!("Pending hash stream closed");
-                                        break;
-                                    };
-                                    dispatch_hash_tx(
-                                        tx_hash,
-                                        current_ws.clone(),
-                                        http_fallback.clone(),
-                                        &fetch_sem,
-                                        &sim_sem,
-                                        &monitor,
-                                        &backend,
-                                        &sim_params,
-                                        &record_tx,
-                                    );
-                                }
-                                _ = shutdown_rx.changed() => return Ok(()),
-                            }
-                        }
-                    }
-                    Err(hash_err) => {
-                        warn!(
-                            "Pending hash subscription failed: {}",
-                            one_line_str(&hash_err.to_string())
-                        );
-                        attempt = attempt.saturating_add(1);
-                    }
-                }
+                attempt = attempt.saturating_add(1);
             }
         }
     }
@@ -427,5 +458,21 @@ fn rotate_if_oversized(path: &Path) {
         let backup = path.with_extension("jsonl.1");
         let _ = fs::rename(path, backup);
         let _ = fs::write(path, tail);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn tls_providers_initialize_without_crypto_provider_panic() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        // HTTPS reqwest client builds TLS config synchronously inside `connect`; succeeds without panicking.
+        let http = ProviderBuilder::new().connect("https://127.0.0.1:1").await;
+        assert!(http.is_ok());
+        // WSS attempts TCP handshake to closed port 1 and returns Err cleanly without rustls panic.
+        let ws = ProviderBuilder::new().connect("wss://127.0.0.1:1").await;
+        assert!(ws.is_err());
     }
 }

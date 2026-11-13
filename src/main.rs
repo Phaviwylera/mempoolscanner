@@ -12,6 +12,8 @@ const GIT_SHA: &str = env!("GIT_COMMIT_SHA");
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let args: Vec<String> = env::args().skip(1).collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("mempool-scanner {VERSION} ({GIT_SHA})");

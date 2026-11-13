@@ -41,15 +41,15 @@
           <div>
             <div class="eyebrow"><span class="eyebrow-line"></span> RUST · ALLOY ABI · IN-PROCESS REVM <span class="eyebrow-index">ENGINE v2.0 / 2026</span></div>
             <h1>Pending calls,<br /><em>simulated in-memory.</em></h1>
-            <p class="intro-copy">A read-only Rust observer that decodes DeFi calldata with Alloy, replays execution inside Revm,<br class="desktop-break" /> and probes caller/recipient substitution &amp; net profit — without signing or broadcasting.</p>
+            <p class="intro-copy">A strictly read-only Rust observer that decodes DeFi calldata with Alloy, replays execution inside in-memory Revm,<br class="desktop-break" /> and classifies access-control protection vs. unguarded extractability — never signing or broadcasting.</p>
           </div>
-          <div class="intro-badge"><span class="badge-orbit"><i></i></span><div><b>OBSERVATION MODE</b><small>NO SIGNING · NO BUNDLE BROADCAST</small></div></div>
+          <div class="intro-badge"><span class="badge-orbit"><i></i></span><div><b>OBSERVATION MODE</b><small>READ-ONLY · NO KEYS · NO TX BROADCAST</small></div></div>
         </section>
 
         <section class="metric-row" aria-label="Live metrics">
           <article class="metric-card metric-primary"><div class="metric-label"><span>01</span> MATCHED CALLS <b class="spark spark-cyan"></b></div><strong id="metric-total">—</strong><small>observations recorded <span class="metric-live"><i></i> LIVE FEED</span></small></article>
           <article class="metric-card"><div class="metric-label"><span>02</span> REVM CALLS OK <b class="metric-dot dot-green"></b></div><strong id="metric-ok">—</strong><small id="metric-ok-sub">successful in-process simulations</small></article>
-          <article class="metric-card"><div class="metric-label"><span>03</span> EXTRACTABLE / FRONT-RUN <b class="metric-dot dot-pink"></b></div><strong id="metric-extractable">—</strong><small id="metric-extractable-sub">unguarded value capture detected</small></article>
+          <article class="metric-card"><div class="metric-label"><span>03</span> UNGUARDED / EXTRACTABLE <b class="metric-dot dot-pink"></b></div><strong id="metric-extractable">—</strong><small id="metric-extractable-sub">read-only counterfactual replay</small></article>
           <article class="metric-card metric-time"><div class="metric-label"><span>04</span> LAST OBSERVATION <b class="spark spark-pink"></b></div><strong id="metric-last">—</strong><small id="metric-last-sub">Waiting for a selector match</small></article>
         </section>
 

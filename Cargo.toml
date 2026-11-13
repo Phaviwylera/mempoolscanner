@@ -2,7 +2,7 @@
 name = "mempool-scanner"
 version = "2.0.0"
 edition = "2021"
-description = "Read-only Ethereum mempool observer with Alloy ABI decoding, in-process Revm simulation, and generalized front-runnability scoring."
+description = "Read-only Ethereum mempool observer with Alloy ABI decoding and in-process Revm counterfactual access-control simulation."
 license = "MIT OR Apache-2.0"
 
 [lib]
@@ -51,6 +51,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 hex = "0.4"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [profile.release]
 opt-level = 3

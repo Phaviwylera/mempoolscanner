@@ -12,7 +12,7 @@ The scanner never holds keys, never signs transactions, and never constructs or 
 | **2. ABI Decoding** | `src/abi.rs` | Decodes calldata with compile-time `alloy::sol!` `SolCall` types across 34 DeFi selectors (claims/airdrops, vault/Aave withdrawals, Uniswap Universal Router / V2 / V3 swaps, and Compound/Aave liquidations), plus `Error(string)`, `Panic(uint256)`, and custom 4-byte reverts. |
 | **3. Pattern Match** | `src/abi.rs` | O(1) `[u8; 4]` selector table classifying targets into `claim`, `withdraw`, `swap`, and `liquidate`. |
 | **4. Revm Simulation** | `src/sim.rs`, `src/state.rs` | Executes the pending call in-process with `revm` (`v43`) against pinned upstream state (`HTTP_RPC` or `ANVIL_RPC`) backed by a shared multi-block bytecode/account/storage cache, plus a stability replay at `block - FORK_CHECK_DEPTH`. |
-| **5. Probe & Profit Scoring** | `src/sim.rs` | Runs synthetic caller-substitution and ABI recipient-rewrite probes in `revm` using a non-existent virtual probe address (`0x0000…00c0ffee`), inspects native ETH state diffs and ERC-20 `Transfer` logs, and classifies each call as `extractable`, `beneficiary_locked`, or `sender_protected` with gas, 90% builder bribe, and net profit estimates. |
+| **5. Access-Control Replay & Scoring** | `src/sim.rs` | Runs read-only counterfactual caller-substitution and ABI recipient-rewrite replays in ephemeral `revm` `CacheDB` overlays using a dummy address (`0x0000…00c0ffee`), classifying each call as `extractable`, `beneficiary_locked`, or `sender_protected` with off-chain gas and value estimates (never signed or broadcast). |
 
 ## Local Setup & Build
 
