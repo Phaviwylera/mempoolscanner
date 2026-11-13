@@ -4,7 +4,7 @@ exec > >(tee -a /var/log/mempolscan-bootstrap.log | logger -t mempolscan-bootstr
 export DEBIAN_FRONTEND=noninteractive
 
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl git jq python3 python3-venv python3-pip
+apt-get install -y --no-install-recommends ca-certificates curl git jq python3
 id -u mempolscan >/dev/null 2>&1 || useradd --system --create-home --home-dir /home/mempolscan --shell /bin/bash mempolscan
 install -d -o mempolscan -g mempolscan -m 0750 /opt/mempoolscanner
 
@@ -40,5 +40,3 @@ DEPLOY_SCRIPT
 chmod 0755 /usr/local/sbin/mempolscan-deploy
 install -d -m 0755 /var/lib/mempolscan
 touch /var/lib/mempolscan/bootstrap-ready
-Write-Output (Join-Path $root 'deploy/user_data.sh')
-

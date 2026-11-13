@@ -66,5 +66,19 @@
 .result-chip[data-kind="stale_fork"]{color:#f3c969}
 .result-chip[data-kind="no_code"]{color:#ff9db0}
 .result-chip[data-kind="state_dependent"]{color:var(--violet)}
+.fk-chip[data-kind="extractable"]{color:#ffcf6e;border-color:#69501e;background:#f3c96914}
+.fk-chip[data-kind="beneficiary_locked"]{color:var(--cyan);border-color:#23534c}
+.fk-chip[data-kind="sender_protected"]{color:var(--green);border-color:#264c38}
+.fk-chip[data-kind="not_applicable"]{color:var(--muted)}
+.decoded-summary{margin-bottom:10px;padding:6px 8px;border:1px solid #222838;background:#0b0e16;font:8px/1.5 var(--mono);color:var(--cyan);word-break:break-all}
+.decision-verdict{margin:0 0 10px;font:8.5px/1.5 var(--mono);color:var(--soft)}
+.decoded-cell-sub{display:block;margin-top:4px;font:7px var(--mono);color:#737b8f;max-width:250px;overflow:hidden;text-overflow:ellipsis}
+.frontrun-summary{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px;padding-top:12px;border-top:1px dashed var(--border)}
+.fr-stat-pill{display:flex;align-items:center;gap:7px;padding:4px 8px;border:1px solid var(--border);border-radius:3px;background:#0c0f18;font:9px var(--mono);color:var(--white)}
+.fork-row-track b.w-0{width:0%}.fork-row-track b.w-5{width:5%}.fork-row-track b.w-10{width:10%}.fork-row-track b.w-15{width:15%}.fork-row-track b.w-20{width:20%}
+.fork-row-track b.w-25{width:25%}.fork-row-track b.w-30{width:30%}.fork-row-track b.w-35{width:35%}.fork-row-track b.w-40{width:40%}.fork-row-track b.w-45{width:45%}
+.fork-row-track b.w-50{width:50%}.fork-row-track b.w-55{width:55%}.fork-row-track b.w-60{width:60%}.fork-row-track b.w-65{width:65%}.fork-row-track b.w-70{width:70%}
+.fork-row-track b.w-75{width:75%}.fork-row-track b.w-80{width:80%}.fork-row-track b.w-85{width:85%}.fork-row-track b.w-90{width:90%}.fork-row-track b.w-95{width:95%}
+.fork-row-track b.w-100{width:100%}
 @media(max-width:1050px){.fork-body{grid-template-columns:1fr}.fork-aside{border-left:0;border-top:1px solid var(--border);padding-left:0;padding-top:14px}}
 @media(max-width:760px){.fork-banner{font-size:8px;gap:8px}.fork-banner-meta{margin-left:0}.fork-row{grid-template-columns:104px minmax(0,1fr) 84px}.fork-fields{grid-template-columns:1fr}.fork-legend li{grid-template-columns:1fr;gap:3px}}

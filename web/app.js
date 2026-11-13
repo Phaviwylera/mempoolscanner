@@ -1,6 +1,13 @@
 const POLL_MS = 5000;
 const DEFAULT_MAX_LAG = 3;
 const QUALITY_ORDER = ["candidate", "state_dependent", "sim_failed", "no_code", "stale_fork", "other"];
+const FILTER_CYCLE = ["all", "ok", "extractable", "failed"];
+const FILTER_LABELS = {
+  all: "ALL MATCHES",
+  ok: "REVM OK",
+  extractable: "EXTRACTABLE",
+  failed: "SIM FAILED",
+};
 const KIND_TEXT = {
   candidate: "CALL OK",
   state_dependent: "BLOCK DEPENDENT",
@@ -9,28 +16,51 @@ const KIND_TEXT = {
   sim_failed: "SIM FAILED",
   other: "UNCLASSIFIED",
 };
+const PROBE_TEXT = {
+  extractable: "EXTRACTABLE",
+  beneficiary_locked: "LOCKED TO VICTIM",
+  sender_protected: "PROTECTED",
+  not_applicable: "N/A",
+};
+
 const state = { hits: [], filter: "all", online: false, quality: null };
 
 const $ = (selector) => document.querySelector(selector);
 const shortHash = (value = "") => value.length > 18 ? `${value.slice(0, 10)}…${value.slice(-6)}` : value || "—";
 const shortAddress = (value = "") => value ? `${value.slice(0, 7)}…${value.slice(-5)}` : "contract creation";
 
-// Label prefix only: the quality labels are read as-is, never renamed.
 function labelKind(label = "") {
   const head = String(label || "").split(":")[0].trim().toLowerCase();
   return QUALITY_ORDER.includes(head) ? head : "other";
 }
 
+function decisionStatus(hit) {
+  const st = hit && hit.decision && hit.decision.status ? String(hit.decision.status) : "not_applicable";
+  return Object.prototype.hasOwnProperty.call(PROBE_TEXT, st) ? st : "not_applicable";
+}
+
 const shown = (value) => value === null || value === undefined || value === "" ? "not recorded" : String(value);
+
+function formatUs(us) {
+  if (us === null || us === undefined || Number.isNaN(Number(us))) return "—";
+  const n = Number(us);
+  if (n < 1000) return `${Math.round(n)} µs`;
+  return `${(n / 1000).toFixed(2)} ms`;
+}
 
 function formatWei(value, decimals = 18, places = 5, suffix = " ETH") {
   try {
-    const amount = BigInt(String(value ?? 0));
+    const raw = String(value ?? "0").trim();
+    const neg = raw.startsWith("-");
+    const clean = neg ? raw.slice(1) : raw;
+    const amount = BigInt(clean || "0");
     const unit = 10n ** BigInt(decimals);
     const whole = amount / unit;
     const fraction = (amount % unit).toString().padStart(decimals, "0").slice(0, places).replace(/0+$/, "");
-    return `${whole.toLocaleString()}${fraction ? `.${fraction}` : ""}${suffix}`;
-  } catch { return "—"; }
+    return `${neg ? "-" : ""}${whole.toLocaleString()}${fraction ? `.${fraction}` : ""}${suffix}`;
+  } catch {
+    return "—";
+  }
 }
 
 function relativeTime(value) {
@@ -62,7 +92,13 @@ function makeCell(text, className = "") {
   return cell;
 }
 
-// ---- global fork-health banner -------------------------------------------
+function matchesHitFilter(hit, filter) {
+  if (filter === "ok") return Boolean(hit.sim?.ok);
+  if (filter === "failed") return !Boolean(hit.sim?.ok);
+  if (filter === "extractable") return decisionStatus(hit) === "extractable";
+  return true;
+}
+
 function renderBanner(data) {
   const banner = $("#fork-banner");
   const summary = data && data.banner ? data.banner : null;
@@ -93,7 +129,8 @@ function rollupRow(kind, count, share) {
   const track = document.createElement("i");
   track.className = "fork-row-track";
   const fill = document.createElement("b");
-  fill.style.width = `${Math.max(0, Math.min(100, Number(share) || 0))}%`;
+  const bucket = Math.round(Math.max(0, Math.min(100, Number(share) || 0)) / 5) * 5;
+  fill.className = `w-${bucket}`;
   track.append(fill);
   const value = document.createElement("em");
   value.textContent = `${count} · ${share === null || share === undefined ? "—" : `${share}%`}`;
@@ -101,7 +138,46 @@ function rollupRow(kind, count, share) {
   return row;
 }
 
-// ---- aggregate fork quality ---------------------------------------------
+function renderPipelineTelemetry(data) {
+  const pipe = data && data.pipeline ? data.pipeline : null;
+  const lat = pipe && pipe.latency_us ? pipe.latency_us : {};
+  const strip = $("#stage-telemetry-strip");
+  const badge = $("#field-latency-badge");
+
+  if (pipe && pipe.with_decision > 0) {
+    strip.textContent = `INGEST ${formatUs(lat.median_ingest)} · DECODE ${formatUs(lat.median_decode)} · REVM SIM ${formatUs(lat.median_sim)} · PROBE ${formatUs(lat.median_probe)}`;
+    badge.textContent = `MEDIAN TOTAL ${formatUs(lat.median_total)}`;
+  } else {
+    strip.textContent = "INGEST — · DECODE — · REVM SIM — · PROBE —";
+    badge.textContent = "MEDIAN —";
+  }
+
+  const simMed = $("#fork-sim-median");
+  if (simMed) {
+    simMed.textContent = lat.median_sim !== null && lat.median_sim !== undefined ? formatUs(lat.median_sim) : "not recorded";
+  }
+
+  const frHost = $("#frontrun-rollup");
+  if (frHost) {
+    frHost.replaceChildren();
+    if (pipe && pipe.with_decision > 0) {
+      const counts = pipe.frontrun_counts || {};
+      for (const key of ["extractable", "beneficiary_locked", "sender_protected"]) {
+        const pill = document.createElement("div");
+        pill.className = "fr-stat-pill";
+        const chip = document.createElement("b");
+        chip.className = "fk-chip";
+        chip.dataset.kind = key;
+        chip.textContent = key;
+        const num = document.createElement("span");
+        num.textContent = String(counts[key] ?? 0);
+        pill.append(chip, num);
+        frHost.append(pill);
+      }
+    }
+  }
+}
+
 function renderRollup(data) {
   const host = $("#fork-rollup");
   const note = $("#fork-rollup-note");
@@ -113,13 +189,13 @@ function renderRollup(data) {
     : "WINDOW —";
   $("#fork-window-chip").textContent = rollup && rollup.available ? String(rollup.with_fork) : "0";
   $("#fork-lag-median").textContent = rollup && rollup.lag ? shown(rollup.lag.median) : "not recorded";
-  $("#fork-lag-max").textContent = rollup && rollup.lag ? shown(rollup.lag.max) : "not recorded";
   $("#fork-checked").textContent = rollup && rollup.checked_share !== null && rollup.checked_share !== undefined
     ? `${rollup.checked_share}%`
     : "not recorded";
 
+  renderPipelineTelemetry(data);
+
   if (!rollup || !rollup.available) {
-    // Never render zeros here: zero counts would read as "everything is fine".
     const empty = document.createElement("p");
     empty.className = "fork-unavailable";
     empty.textContent = rollup && rollup.note ? rollup.note : "fork data unavailable for this range";
@@ -136,23 +212,52 @@ function renderRollup(data) {
     host.append(rollupRow(kind, count, rollup.percent ? rollup.percent[kind] : null));
   }
   const parts = [`${rollup.with_fork} of ${rollup.total} record(s) carry fork evidence`];
-  if (rollup.checked_share !== null && rollup.checked_share !== undefined) parts.push(`${rollup.checked_share}% ran the stability check`);
+  if (rollup.checked_share !== null && rollup.checked_share !== undefined) parts.push(`${rollup.checked_share}% ran stability check`);
   note.textContent = parts.join(" · ") + ".";
 }
 
-// ---- per-hit fork provenance --------------------------------------------
 function buildEvidence(hit) {
   const fork = hit && hit.fork && typeof hit.fork === "object" && Object.keys(hit.fork).length ? hit.fork : null;
+  const decision = hit && hit.decision && typeof hit.decision === "object" ? hit.decision : null;
+  const decoded = hit && hit.decoded && typeof hit.decoded === "object" ? hit.decoded : null;
+  const telemetry = hit && hit.telemetry && typeof hit.telemetry === "object" ? hit.telemetry : null;
   const maxLag = state.quality && state.quality.window && typeof state.quality.window.max_lag === "number"
     ? state.quality.window.max_lag
     : DEFAULT_MAX_LAG;
+
   const wrap = document.createElement("div");
   wrap.className = "fork-evidence";
+
+  if (decoded && decoded.summary) {
+    const abiBox = document.createElement("div");
+    abiBox.className = "decoded-summary";
+    abiBox.textContent = decoded.summary;
+    wrap.append(abiBox);
+  }
+
+  if (decision) {
+    const decHead = document.createElement("div");
+    decHead.className = "fork-evidence-head";
+    const decTitle = document.createElement("span");
+    decTitle.textContent = "FRONT-RUN PROBE";
+    const st = decisionStatus(hit);
+    const decChip = document.createElement("b");
+    decChip.className = "fk-chip";
+    decChip.dataset.kind = st;
+    decChip.textContent = st;
+    decHead.append(decTitle, decChip);
+    wrap.append(decHead);
+
+    const verdict = document.createElement("p");
+    verdict.className = "decision-verdict";
+    verdict.textContent = decision.verdict || st;
+    wrap.append(verdict);
+  }
 
   const head = document.createElement("div");
   head.className = "fork-evidence-head";
   const title = document.createElement("span");
-  title.textContent = "FORK EVIDENCE";
+  title.textContent = "REVM & FORK EVIDENCE";
   const kind = labelKind(hit ? hit.label : "");
   const chip = document.createElement("b");
   chip.className = "fk-chip";
@@ -188,15 +293,20 @@ function buildEvidence(hit) {
   const headText = fork.head === null || fork.head === undefined
     ? "not recorded"
     : lag === null
-      ? `${fork.head} · lag not recorded`
-      : `${fork.head} · lag ${lag}${stale ? " ⚠ stale" : ""}`;
+      ? `${fork.head} · lag n/a`
+      : `${fork.head} · lag ${lag}${stale ? " ⚠" : ""}`;
   row("HEAD / LAG", headText, stale);
-  row("DEPTH", shown(fork.depth));
-  row("CONTRACT CODE", fork.code_present === true ? "present" : fork.code_present === false ? "absent" : "not recorded");
-  const checked = Array.isArray(fork.checked) ? fork.checked : [];
-  row("STABILITY CHECK", checked.length ? `ran · ${checked.join(" + ")}` : "not run");
-  const reference = fork.reference && typeof fork.reference === "object" ? fork.reference : null;
-  row("REFERENCE OUTCOME", reference ? `block ${shown(reference.block)} · ${reference.ok ? "ok" : "reverted"}` : "not recorded");
+  row("GAS USED", hit.sim && hit.sim.gas_used ? Number(hit.sim.gas_used).toLocaleString() : shown(hit.gas));
+  row("NET PROFIT EST", decision && decision.net_profit_wei && decision.net_profit_wei !== "0" ? formatWei(decision.net_profit_wei) : "0 ETH");
+  if (telemetry) {
+    row("REVM SIM", formatUs(telemetry.sim_us));
+    row("PROBE SIM", formatUs(telemetry.probe_us));
+  } else {
+    const checked = Array.isArray(fork.checked) ? fork.checked : [];
+    row("STABILITY", checked.length ? `ran · ${checked.join(" + ")}` : "not run");
+    row("CODE", fork.code_present === true ? "present" : fork.code_present === false ? "absent" : "n/a");
+  }
+
   wrap.append(list);
   return wrap;
 }
@@ -230,29 +340,82 @@ function renderLatest(hit) {
 function renderTable() {
   const body = $("#activity-body");
   body.replaceChildren();
-  const visible = state.hits.filter((hit) => state.filter === "all" || Boolean(hit.sim?.ok) === (state.filter === "ok"));
+  const visible = state.hits.filter((hit) => matchesHitFilter(hit, state.filter));
   $("#activity-count").textContent = String(state.hits.length);
   $("#shown-count").textContent = String(visible.length);
   if (!visible.length) {
     const row = document.createElement("tr"); row.className = "empty-row";
-    const cell = document.createElement("td"); cell.colSpan = 8;
+    const cell = document.createElement("td"); cell.colSpan = 9;
     const mark = document.createElement("span"); mark.className = "empty-mark"; mark.textContent = "⌁";
     const title = document.createElement("b"); title.textContent = state.hits.length ? "No observations match this filter" : "Waiting for the first selector match";
-    const note = document.createElement("small"); note.textContent = state.hits.length ? "Choose All matches to show every recorded observation." : "Only actual observations are shown here. No sample transactions are inserted.";
+    const note = document.createElement("small"); note.textContent = state.hits.length ? "Cycle filter back to ALL MATCHES to view every recorded hit." : "Only actual observations are shown here. No sample transactions are inserted.";
     cell.append(mark, title, note); row.append(cell); body.append(row); return;
   }
+
   for (const hit of visible.slice(0, 50)) {
     const row = document.createElement("tr");
+
     const name = document.createElement("td"); name.className = "function-name";
-    const nameTag = document.createElement("span"); nameTag.className = "function-chip"; nameTag.textContent = hit.name || "selector"; name.append(nameTag); row.append(name);
-    const hash = document.createElement("td"); const link = document.createElement("a"); link.className = "tx-link"; link.href = `https://etherscan.io/tx/${encodeURIComponent(hit.hash || "")}`; link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = shortHash(hit.hash); hash.append(link); row.append(hash);
-    row.append(makeCell(shortAddress(hit.from), "address"), makeCell(shortAddress(hit.to), "address"), makeCell(formatWei(hit.value)), makeCell(Number(hit.gas || 0).toLocaleString()));
-    const result = document.createElement("td"); const chip = document.createElement("span"); const ok = Boolean(hit.sim?.ok); const kind = labelKind(hit.label);
-    chip.className = `result-chip${ok ? "" : " failed"}`; chip.dataset.kind = kind;
-    const dot = document.createElement("i"); const label = document.createElement("span");
+    const nameTag = document.createElement("span"); nameTag.className = "function-chip";
+    nameTag.textContent = hit.name || "selector";
+    name.append(nameTag);
+    if (hit.decoded && hit.decoded.summary) {
+      const sub = document.createElement("small");
+      sub.className = "decoded-cell-sub";
+      sub.textContent = hit.decoded.summary;
+      name.append(sub);
+    }
+    row.append(name);
+
+    const hash = document.createElement("td");
+    const link = document.createElement("a");
+    link.className = "tx-link";
+    link.href = `https://etherscan.io/tx/${encodeURIComponent(hit.hash || "")}`;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = shortHash(hit.hash);
+    hash.append(link);
+    row.append(hash);
+
+    const gasDisplayed = hit.sim && hit.sim.gas_used ? Number(hit.sim.gas_used) : Number(hit.gas || 0);
+    row.append(
+      makeCell(shortAddress(hit.from), "address"),
+      makeCell(shortAddress(hit.to), "address"),
+      makeCell(formatWei(hit.value)),
+      makeCell(gasDisplayed.toLocaleString()),
+    );
+
+    const probeCell = document.createElement("td");
+    const dStatus = decisionStatus(hit);
+    const pChip = document.createElement("span");
+    pChip.className = "fk-chip";
+    pChip.dataset.kind = dStatus;
+    let probeLabel = PROBE_TEXT[dStatus] || "N/A";
+    if (dStatus === "extractable" && hit.decision && hit.decision.would_frontrun && hit.decision.net_profit_wei !== "0") {
+      probeLabel = `+${formatWei(hit.decision.net_profit_wei, 18, 4, " ETH")}`;
+    }
+    pChip.textContent = probeLabel;
+    probeCell.append(pChip);
+    row.append(probeCell);
+
+    const result = document.createElement("td");
+    const chip = document.createElement("span");
+    const ok = Boolean(hit.sim?.ok);
+    const kind = labelKind(hit.label);
+    chip.className = `result-chip${ok ? "" : " failed"}`;
+    chip.dataset.kind = kind;
+    const dot = document.createElement("i");
+    const label = document.createElement("span");
     label.textContent = KIND_TEXT[kind] || (ok ? "CALL OK" : "SIM FAILED");
-    chip.append(dot, label); result.append(chip); row.append(result);
-    const time = document.createElement("td"); time.textContent = new Date(hit.ts).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" }); row.append(time);
+    chip.append(dot, label);
+    result.append(chip);
+    row.append(result);
+
+    const time = document.createElement("td");
+    const utcStr = new Date(hit.ts).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" });
+    time.textContent = hit.telemetry && hit.telemetry.sim_us ? `${utcStr} · ${formatUs(hit.telemetry.sim_us)}` : utcStr;
+    row.append(time);
+
     body.append(row);
   }
 }
@@ -260,14 +423,21 @@ function renderTable() {
 function render() {
   const total = state.hits.length;
   const success = state.hits.filter((hit) => Boolean(hit.sim?.ok)).length;
-  const failed = total - success;
+  const extractable = state.hits.filter((hit) => decisionStatus(hit) === "extractable").length;
+  const wouldFrontrun = state.hits.filter((hit) => Boolean(hit.decision?.would_frontrun)).length;
+
   $("#metric-total").textContent = total.toLocaleString();
   $("#metric-ok").textContent = success.toLocaleString();
-  $("#metric-failed").textContent = failed.toLocaleString();
+  $("#metric-extractable").textContent = extractable.toLocaleString();
+  $("#metric-extractable-sub").textContent = wouldFrontrun
+    ? `${wouldFrontrun} profitable after gas & 90% bribe`
+    : "caller & recipient substitution probes";
+
   const latest = state.hits[0];
   $("#metric-last").textContent = latest ? relativeTime(latest.ts) : "—";
   $("#metric-last-sub").textContent = latest ? `${latest.name || "selector"} · ${shortHash(latest.hash)}` : "Waiting for a selector match";
-  renderLatest(latest); renderTable();
+  renderLatest(latest);
+  renderTable();
 }
 
 async function refreshQuality() {
@@ -294,7 +464,7 @@ async function refresh() {
     setOnline(true);
     $("#updated-at").textContent = `UPDATED ${new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" })} UTC`;
     render();
-  } catch (error) {
+  } catch {
     setOnline(false, "API unavailable · retrying");
     $("#updated-at").textContent = "FEED RETRYING";
   }
@@ -303,14 +473,14 @@ async function refresh() {
 
 $("#refresh-button").addEventListener("click", refresh);
 $("#clear-filter").addEventListener("click", (event) => {
-  state.filter = state.filter === "all" ? "ok" : state.filter === "ok" ? "failed" : "all";
-  const label = state.filter === "all" ? "ALL MATCHES" : state.filter === "ok" ? "CALL OK" : "SIM FAILED";
+  const nextIdx = (FILTER_CYCLE.indexOf(state.filter) + 1) % FILTER_CYCLE.length;
+  state.filter = FILTER_CYCLE[nextIdx];
+  const label = FILTER_LABELS[state.filter] || "ALL MATCHES";
   event.currentTarget.firstChild.textContent = `${label} `;
   renderTable();
   refreshQuality();
 });
 
-// Ambient orbital field inspired by the reference; it does not map transaction paths.
 function startField() {
   const canvas = $("#field-canvas");
   const context = canvas.getContext("2d");

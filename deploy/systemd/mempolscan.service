@@ -1,7 +1,6 @@
 [Unit]
-Description=Read-only mempool scanner
-After=network-online.target mempolscan-anvil.service
-Requires=mempolscan-anvil.service
+Description=Read-only Rust Alloy + Revm mempool scanner
+After=network-online.target
 Wants=network-online.target
 
 [Service]
@@ -10,10 +9,9 @@ User=mempolscan
 Group=mempolscan
 WorkingDirectory=/opt/mempoolscanner
 EnvironmentFile=/opt/mempoolscanner/.env
-Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=/opt/mempoolscanner/venv/bin/python /opt/mempoolscanner/mempool_scanner.py
+ExecStart=/opt/mempoolscanner/bin/mempool-scanner
 Restart=always
-RestartSec=10
+RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
@@ -22,4 +20,3 @@ ReadWritePaths=/opt/mempoolscanner/logs
 
 [Install]
 WantedBy=multi-user.target
-

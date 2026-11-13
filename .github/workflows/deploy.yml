@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 concurrency:
@@ -15,7 +15,57 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the commit being deployed
+        uses: actions/checkout@v7
+
+      - name: Run Python API unit tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Configure Rust & musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools pkg-config
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Run Rust unit & Revm integration tests
+        run: cargo test --all-targets
+
+      - name: Build static Linux release binary & publish build artifact release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMIT_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          GITHUB_SHA="${COMMIT_SHA}" cargo build --release --target x86_64-unknown-linux-musl
+          cp target/x86_64-unknown-linux-musl/release/mempool-scanner mempool-scanner-linux-x86_64
+          ./mempool-scanner-linux-x86_64 --version
+          sha256sum mempool-scanner-linux-x86_64 > mempool-scanner-linux-x86_64.sha256
+
+          TAG="build-${COMMIT_SHA}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" mempool-scanner-linux-x86_64 mempool-scanner-linux-x86_64.sha256 --clobber
+          else
+            gh release create "$TAG" mempool-scanner-linux-x86_64 mempool-scanner-linux-x86_64.sha256 \
+              --prerelease \
+              --title "Automated build ${COMMIT_SHA}" \
+              --notes "Static x86_64-unknown-linux-musl mempool-scanner binary for EC2 deployment."
+          fi
+
+          gh release list --limit 30 --json tagName --jq '.[].tagName' \
+            | grep '^build-' \
+            | tail -n +6 \
+            | while IFS= read -r old_tag; do
+                gh release delete "$old_tag" --yes --cleanup-tag || true
+              done
+
   deploy:
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - name: Check out the commit being deployed
@@ -43,7 +93,7 @@ jobs:
             --parameters "commands=sudo /usr/local/sbin/mempolscan-deploy ${COMMIT_SHA}" \
             --query 'Command.CommandId' --output text)"
           echo "SSM command: ${command_id}"
-          aws ssm wait command-executed --command-id "$command_id" --instance-id "$INSTANCE_ID"
+          aws ssm wait command-executed --command-id "$command_id" --instance-id "$INSTANCE_ID" || true
           invocation="$(aws ssm get-command-invocation --command-id "$command_id" --instance-id "$INSTANCE_ID" --output json)"
           echo "$invocation" | jq -r '.StandardOutputContent'
           status="$(echo "$invocation" | jq -r '.Status')"
@@ -68,8 +118,6 @@ jobs:
             --parameters "commands=bash /opt/mempoolscanner/deploy/verify_release.sh ${HITS_DEADLINE_SECONDS}" \
             --query 'Command.CommandId' --output text)"
           echo "SSM command: ${command_id}"
-          # The waiter exits non-zero when the command fails; keep going so the
-          # remote output is printed before the job is marked failed.
           aws ssm wait command-executed --command-id "$command_id" --instance-id "$INSTANCE_ID" || true
           invocation="$(aws ssm get-command-invocation --command-id "$command_id" --instance-id "$INSTANCE_ID" --output json)"
           echo "$invocation" | jq -r '.StandardOutputContent'
@@ -79,4 +127,3 @@ jobs:
             echo "$invocation" | jq -r '.StandardErrorContent' >&2
             exit 1
           fi
-
