@@ -6,3 +6,65 @@
 @media(max-width:440px){.intro h1{font-size:40px}.eyebrow{font-size:7px}.eyebrow-index{margin-left:5px}.field-stage{height:270px}.side-stack{grid-template-columns:1fr}.latest-panel{min-height:145px}.latest-empty{height:auto}.panel-meta{gap:8px;font-size:7px}.metric-label{font-size:6.5px}.metric-card>small{font-size:7px}.method-stamp{grid-column:3;grid-row:1 / span 2}.method-strip{grid-template-columns:1fr 14px 1fr}.field-caption{font-size:6px;padding:0 9px}.field-caption span:last-child{max-width:62%;text-align:right}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important}}
 
+
+/* ---- fork quality: banner, rollup, per-hit evidence ---- */
+.fork-banner{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:16px 0 0;padding:10px 14px;border:1px solid var(--border);border-left:3px solid var(--muted);border-radius:4px;background:linear-gradient(90deg,rgba(255,255,255,.03),transparent);font:9px var(--mono);letter-spacing:.1em;color:var(--soft);text-transform:uppercase}
+.fork-banner b{font-weight:700;color:var(--white);letter-spacing:.12em}
+.fork-banner-mark{width:7px;height:7px;border-radius:50%;background:var(--muted);flex:none;box-shadow:0 0 8px currentColor}
+.fork-banner-meta{margin-left:auto;color:var(--muted);letter-spacing:.12em}
+.fork-banner[data-state="green"]{border-left-color:var(--green)}
+.fork-banner[data-state="green"] .fork-banner-mark{background:var(--green)}
+.fork-banner[data-state="green"] b{color:var(--green)}
+.fork-banner[data-state="amber"]{border-left-color:#f3c969}
+.fork-banner[data-state="amber"] .fork-banner-mark{background:#f3c969}
+.fork-banner[data-state="amber"] b{color:#f3c969}
+.fork-banner[data-state="red"]{border-left-color:#ff6f8b;background:linear-gradient(90deg,rgba(255,111,139,.12),transparent)}
+.fork-banner[data-state="red"] .fork-banner-mark{background:#ff6f8b}
+.fork-banner[data-state="red"] b{color:#ffb3c1}
+.fork-panel{margin-top:24px}
+.fork-body{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr);gap:24px;padding:18px 20px 20px}
+.fork-rollup{display:flex;flex-direction:column;gap:9px}
+.fork-row{display:grid;grid-template-columns:132px minmax(0,1fr) 96px;align-items:center;gap:12px;font:9px var(--mono);letter-spacing:.08em;color:var(--soft)}
+.fork-row-track{display:block;height:6px;background:#151824;border:1px solid #1d2130;border-radius:3px;overflow:hidden}
+.fork-row-track b{display:block;height:100%;background:var(--cyan);border-radius:2px;transition:width .35s ease}
+.fork-row em{font-style:normal;color:var(--muted);text-align:right;letter-spacing:.06em}
+.fork-row[data-kind="candidate"] .fork-row-track b{background:var(--green)}
+.fork-row[data-kind="state_dependent"] .fork-row-track b{background:var(--violet)}
+.fork-row[data-kind="stale_fork"] .fork-row-track b{background:#f3c969}
+.fork-row[data-kind="no_code"] .fork-row-track b{background:#ff6f8b}
+.fork-row[data-kind="sim_failed"] .fork-row-track b{background:var(--pink)}
+.fork-row[data-kind="other"] .fork-row-track b{background:var(--muted)}
+.fork-unavailable{margin:0;padding:14px;border:1px dashed var(--border);border-radius:4px;color:var(--muted);font:9px var(--mono);letter-spacing:.1em;text-transform:uppercase}
+.fork-aside{display:flex;flex-direction:column;gap:14px;border-left:1px solid var(--border);padding-left:22px}
+.fork-note{margin:0;color:var(--soft);font-size:10px;line-height:1.6}
+.fork-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:0}
+.fork-stats div{display:flex;flex-direction:column;gap:4px}
+.fork-stats dt{font:8px var(--mono);letter-spacing:.1em;color:var(--muted)}
+.fork-stats dd{margin:0;font:600 15px var(--sans);color:var(--white)}
+.fork-legend{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:7px}
+.fork-legend li{display:grid;grid-template-columns:118px minmax(0,1fr);gap:10px;align-items:baseline}
+.fork-legend span{color:var(--muted);font-size:9.5px;line-height:1.5}
+.fk-chip{display:inline-block;font:8px var(--mono);letter-spacing:.06em;padding:2px 6px;border:1px solid var(--border);border-radius:3px;color:var(--soft);background:#0f121b;white-space:nowrap}
+.fk-chip[data-kind="candidate"]{color:var(--green);border-color:#2c5a41}
+.fk-chip[data-kind="state_dependent"]{color:var(--violet);border-color:#3d3566}
+.fk-chip[data-kind="stale_fork"]{color:#f3c969;border-color:#5a4a22}
+.fk-chip[data-kind="no_code"]{color:#ff9db0;border-color:#5c2c38}
+.fk-chip[data-kind="sim_failed"]{color:var(--pink);border-color:#5a2a45}
+.fk-chip[data-kind="other"]{color:var(--muted)}
+.latest-label[data-kind="candidate"]{color:var(--green)}
+.latest-label[data-kind="state_dependent"]{color:var(--violet)}
+.latest-label[data-kind="stale_fork"]{color:#f3c969}
+.latest-label[data-kind="no_code"]{color:#ff9db0}
+.fork-evidence{margin-top:12px;padding-top:11px;border-top:1px solid var(--border)}
+.fork-evidence-head{display:flex;align-items:center;justify-content:space-between;gap:10px;font:8px var(--mono);letter-spacing:.14em;color:var(--muted);margin-bottom:8px}
+.fork-fields{margin:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px 14px}
+.fork-fields div{display:flex;justify-content:space-between;gap:8px;border-bottom:1px dotted #1b1f2b;padding-bottom:4px}
+.fork-fields dt{font:8px var(--mono);letter-spacing:.08em;color:var(--muted);white-space:nowrap}
+.fork-fields dd{margin:0;font:9px var(--mono);color:var(--soft);text-align:right}
+.fork-fields dd.flagged{color:#f3c969}
+.fork-missing{margin:0;font:9px var(--mono);color:var(--muted);letter-spacing:.06em}
+.result-chip[data-kind="stale_fork"]{color:#f3c969}
+.result-chip[data-kind="no_code"]{color:#ff9db0}
+.result-chip[data-kind="state_dependent"]{color:var(--violet)}
+@media(max-width:1050px){.fork-body{grid-template-columns:1fr}.fork-aside{border-left:0;border-top:1px solid var(--border);padding-left:0;padding-top:14px}}
+@media(max-width:760px){.fork-banner{font-size:8px;gap:8px}.fork-banner-meta{margin-left:0}.fork-row{grid-template-columns:104px minmax(0,1fr) 84px}.fork-fields{grid-template-columns:1fr}.fork-legend li{grid-template-columns:1fr;gap:3px}}

@@ -1,9 +1,27 @@
 const POLL_MS = 5000;
-const state = { hits: [], filter: "all", online: false };
+const DEFAULT_MAX_LAG = 3;
+const QUALITY_ORDER = ["candidate", "state_dependent", "sim_failed", "no_code", "stale_fork", "other"];
+const KIND_TEXT = {
+  candidate: "CALL OK",
+  state_dependent: "BLOCK DEPENDENT",
+  stale_fork: "STALE FORK",
+  no_code: "NO CODE",
+  sim_failed: "SIM FAILED",
+  other: "UNCLASSIFIED",
+};
+const state = { hits: [], filter: "all", online: false, quality: null };
 
 const $ = (selector) => document.querySelector(selector);
 const shortHash = (value = "") => value.length > 18 ? `${value.slice(0, 10)}…${value.slice(-6)}` : value || "—";
 const shortAddress = (value = "") => value ? `${value.slice(0, 7)}…${value.slice(-5)}` : "contract creation";
+
+// Label prefix only: the quality labels are read as-is, never renamed.
+function labelKind(label = "") {
+  const head = String(label || "").split(":")[0].trim().toLowerCase();
+  return QUALITY_ORDER.includes(head) ? head : "other";
+}
+
+const shown = (value) => value === null || value === undefined || value === "" ? "not recorded" : String(value);
 
 function formatWei(value, decimals = 18, places = 5, suffix = " ETH") {
   try {
@@ -44,6 +62,145 @@ function makeCell(text, className = "") {
   return cell;
 }
 
+// ---- global fork-health banner -------------------------------------------
+function renderBanner(data) {
+  const banner = $("#fork-banner");
+  const summary = data && data.banner ? data.banner : null;
+  const kind = summary && summary.state ? summary.state : "unknown";
+  banner.dataset.state = kind;
+  $("#fork-banner-state").textContent = `FORK HEALTH: ${kind.toUpperCase()}`;
+  $("#fork-banner-text").textContent = summary
+    ? summary.text
+    : "fork evidence endpoint unavailable — quality cannot be confirmed";
+  const meta = [];
+  if (summary) {
+    if (summary.lag !== null && summary.lag !== undefined) meta.push(`LAG ${summary.lag}`);
+    if (summary.max_observed_lag !== null && summary.max_observed_lag !== undefined) meta.push(`MAX LAG ${summary.max_observed_lag}`);
+    if (summary.stalled) meta.push("STALLED");
+    if (summary.newest_ts) meta.push(`NEWEST ${relativeTime(summary.newest_ts)}`);
+    if (summary.window) meta.push(`WINDOW ${summary.window}`);
+  }
+  $("#fork-banner-meta").textContent = meta.join(" · ") || "NO RECORDS";
+}
+
+function rollupRow(kind, count, share) {
+  const row = document.createElement("div");
+  row.className = "fork-row";
+  row.dataset.kind = kind;
+  const name = document.createElement("span");
+  name.className = "fork-row-name";
+  name.textContent = kind;
+  const track = document.createElement("i");
+  track.className = "fork-row-track";
+  const fill = document.createElement("b");
+  fill.style.width = `${Math.max(0, Math.min(100, Number(share) || 0))}%`;
+  track.append(fill);
+  const value = document.createElement("em");
+  value.textContent = `${count} · ${share === null || share === undefined ? "—" : `${share}%`}`;
+  row.append(name, track, value);
+  return row;
+}
+
+// ---- aggregate fork quality ---------------------------------------------
+function renderRollup(data) {
+  const host = $("#fork-rollup");
+  const note = $("#fork-rollup-note");
+  const rollup = data && data.rollup ? data.rollup : null;
+  host.replaceChildren();
+
+  $("#fork-window-note").textContent = data && data.window
+    ? `FILTER ${String(data.window.filter || "all").toUpperCase()} · ${shown(data.window.filtered)} / ${shown(data.window.returned)} RECORDS`
+    : "WINDOW —";
+  $("#fork-window-chip").textContent = rollup && rollup.available ? String(rollup.with_fork) : "0";
+  $("#fork-lag-median").textContent = rollup && rollup.lag ? shown(rollup.lag.median) : "not recorded";
+  $("#fork-lag-max").textContent = rollup && rollup.lag ? shown(rollup.lag.max) : "not recorded";
+  $("#fork-checked").textContent = rollup && rollup.checked_share !== null && rollup.checked_share !== undefined
+    ? `${rollup.checked_share}%`
+    : "not recorded";
+
+  if (!rollup || !rollup.available) {
+    // Never render zeros here: zero counts would read as "everything is fine".
+    const empty = document.createElement("p");
+    empty.className = "fork-unavailable";
+    empty.textContent = rollup && rollup.note ? rollup.note : "fork data unavailable for this range";
+    host.append(empty);
+    note.textContent = rollup && rollup.total
+      ? `${rollup.total} record(s) in this window predate fork evidence.`
+      : "No records in this window yet.";
+    return;
+  }
+
+  for (const kind of QUALITY_ORDER) {
+    const count = rollup.counts ? rollup.counts[kind] ?? 0 : 0;
+    if (kind === "other" && !count) continue;
+    host.append(rollupRow(kind, count, rollup.percent ? rollup.percent[kind] : null));
+  }
+  const parts = [`${rollup.with_fork} of ${rollup.total} record(s) carry fork evidence`];
+  if (rollup.checked_share !== null && rollup.checked_share !== undefined) parts.push(`${rollup.checked_share}% ran the stability check`);
+  note.textContent = parts.join(" · ") + ".";
+}
+
+// ---- per-hit fork provenance --------------------------------------------
+function buildEvidence(hit) {
+  const fork = hit && hit.fork && typeof hit.fork === "object" && Object.keys(hit.fork).length ? hit.fork : null;
+  const maxLag = state.quality && state.quality.window && typeof state.quality.window.max_lag === "number"
+    ? state.quality.window.max_lag
+    : DEFAULT_MAX_LAG;
+  const wrap = document.createElement("div");
+  wrap.className = "fork-evidence";
+
+  const head = document.createElement("div");
+  head.className = "fork-evidence-head";
+  const title = document.createElement("span");
+  title.textContent = "FORK EVIDENCE";
+  const kind = labelKind(hit ? hit.label : "");
+  const chip = document.createElement("b");
+  chip.className = "fk-chip";
+  chip.dataset.kind = kind;
+  chip.textContent = kind;
+  head.append(title, chip);
+  wrap.append(head);
+
+  if (!fork) {
+    const missing = document.createElement("p");
+    missing.className = "fork-missing";
+    missing.textContent = "not recorded · this observation predates fork evidence";
+    wrap.append(missing);
+    return wrap;
+  }
+
+  const list = document.createElement("dl");
+  list.className = "fork-fields";
+  const row = (term, value, flagged = false) => {
+    const item = document.createElement("div");
+    const dt = document.createElement("dt");
+    dt.textContent = term;
+    const dd = document.createElement("dd");
+    dd.textContent = value;
+    if (flagged) dd.classList.add("flagged");
+    item.append(dt, dd);
+    list.append(item);
+  };
+
+  row("BLOCK", shown(fork.block));
+  const lag = typeof fork.lag === "number" ? fork.lag : null;
+  const stale = lag !== null && lag > maxLag;
+  const headText = fork.head === null || fork.head === undefined
+    ? "not recorded"
+    : lag === null
+      ? `${fork.head} · lag not recorded`
+      : `${fork.head} · lag ${lag}${stale ? " ⚠ stale" : ""}`;
+  row("HEAD / LAG", headText, stale);
+  row("DEPTH", shown(fork.depth));
+  row("CONTRACT CODE", fork.code_present === true ? "present" : fork.code_present === false ? "absent" : "not recorded");
+  const checked = Array.isArray(fork.checked) ? fork.checked : [];
+  row("STABILITY CHECK", checked.length ? `ran · ${checked.join(" + ")}` : "not run");
+  const reference = fork.reference && typeof fork.reference === "object" ? fork.reference : null;
+  row("REFERENCE OUTCOME", reference ? `block ${shown(reference.block)} · ${reference.ok ? "ok" : "reverted"}` : "not recorded");
+  wrap.append(list);
+  return wrap;
+}
+
 function renderLatest(hit) {
   const host = $("#latest-hit");
   host.replaceChildren();
@@ -58,12 +215,16 @@ function renderLatest(hit) {
   }
   host.className = "latest-hit";
   const title = document.createElement("div"); title.className = "latest-name"; title.textContent = hit.name || "Unknown selector";
-  const label = document.createElement("span"); label.className = "latest-label"; label.textContent = hit.label || "SIMULATION RESULT";
+  const label = document.createElement("span");
+  label.className = "latest-label";
+  label.dataset.kind = labelKind(hit.label);
+  label.textContent = hit.label || "SIMULATION RESULT";
   const detail = document.createElement("div"); detail.className = "latest-detail";
   const tx = document.createElement("span"); tx.textContent = `TX  ${shortHash(hit.hash)}`;
   const dest = document.createElement("span"); dest.textContent = `TO  ${shortAddress(hit.to)}`;
   const timing = document.createElement("span"); timing.textContent = `SEEN  ${relativeTime(hit.ts)}`;
-  detail.append(tx, dest, timing); host.append(title, label, detail);
+  detail.append(tx, dest, timing);
+  host.append(title, label, detail, buildEvidence(hit));
 }
 
 function renderTable() {
@@ -86,7 +247,11 @@ function renderTable() {
     const nameTag = document.createElement("span"); nameTag.className = "function-chip"; nameTag.textContent = hit.name || "selector"; name.append(nameTag); row.append(name);
     const hash = document.createElement("td"); const link = document.createElement("a"); link.className = "tx-link"; link.href = `https://etherscan.io/tx/${encodeURIComponent(hit.hash || "")}`; link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = shortHash(hit.hash); hash.append(link); row.append(hash);
     row.append(makeCell(shortAddress(hit.from), "address"), makeCell(shortAddress(hit.to), "address"), makeCell(formatWei(hit.value)), makeCell(Number(hit.gas || 0).toLocaleString()));
-    const result = document.createElement("td"); const chip = document.createElement("span"); const ok = Boolean(hit.sim?.ok); chip.className = `result-chip${ok ? "" : " failed"}`; const dot = document.createElement("i"); const label = document.createElement("span"); label.textContent = ok ? "CALL OK" : "SIM FAILED"; chip.append(dot, label); result.append(chip); row.append(result);
+    const result = document.createElement("td"); const chip = document.createElement("span"); const ok = Boolean(hit.sim?.ok); const kind = labelKind(hit.label);
+    chip.className = `result-chip${ok ? "" : " failed"}`; chip.dataset.kind = kind;
+    const dot = document.createElement("i"); const label = document.createElement("span");
+    label.textContent = KIND_TEXT[kind] || (ok ? "CALL OK" : "SIM FAILED");
+    chip.append(dot, label); result.append(chip); row.append(result);
     const time = document.createElement("td"); time.textContent = new Date(hit.ts).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" }); row.append(time);
     body.append(row);
   }
@@ -105,6 +270,20 @@ function render() {
   renderLatest(latest); renderTable();
 }
 
+async function refreshQuality() {
+  try {
+    const response = await fetch(`/api/quality?limit=100&filter=${encodeURIComponent(state.filter)}`, { cache: "no-store", headers: { Accept: "application/json" } });
+    if (!response.ok) throw new Error(`quality feed returned ${response.status}`);
+    state.quality = await response.json();
+  } catch {
+    state.quality = null;
+  }
+  renderBanner(state.quality);
+  renderRollup(state.quality);
+  const latest = state.hits[0];
+  if (latest) renderLatest(latest);
+}
+
 async function refresh() {
   try {
     const response = await fetch("/api/hits?limit=100", { cache: "no-store", headers: { Accept: "application/json" } });
@@ -119,6 +298,7 @@ async function refresh() {
     setOnline(false, "API unavailable · retrying");
     $("#updated-at").textContent = "FEED RETRYING";
   }
+  await refreshQuality();
 }
 
 $("#refresh-button").addEventListener("click", refresh);
@@ -127,6 +307,7 @@ $("#clear-filter").addEventListener("click", (event) => {
   const label = state.filter === "all" ? "ALL MATCHES" : state.filter === "ok" ? "CALL OK" : "SIM FAILED";
   event.currentTarget.firstChild.textContent = `${label} `;
   renderTable();
+  refreshQuality();
 });
 
 // Ambient orbital field inspired by the reference; it does not map transaction paths.
@@ -181,4 +362,3 @@ function startField() {
 }
 
 startField(); refresh(); window.setInterval(refresh, POLL_MS);
-

@@ -29,6 +29,13 @@
       </header>
 
       <main id="top">
+        <div id="fork-banner" class="fork-banner" data-state="unknown" role="status" aria-live="polite">
+          <span class="fork-banner-mark" aria-hidden="true"></span>
+          <b id="fork-banner-state">FORK HEALTH: UNKNOWN</b>
+          <span id="fork-banner-text">Reading fork evidence…</span>
+          <span id="fork-banner-meta" class="fork-banner-meta">NO RECORDS</span>
+        </div>
+
         <section id="overview" class="intro">
           <div>
             <div class="eyebrow"><span class="eyebrow-line"></span> LIVE TRANSACTION OBSERVATION <span class="eyebrow-index">FIELD NOTE 001 / 2026</span></div>
@@ -56,7 +63,7 @@
               <div class="field-node node-a"><i></i><span>SELECTOR<br /><b>WATCH</b></span></div>
               <div class="field-node node-b"><i></i><span>LOCAL<br /><b>FORK</b></span></div>
               <div class="field-node node-c"><i></i><span>READ ONLY<br /><b>ETH_CALL</b></span></div>
-              <div class="field-coordinate coord-a">37° 46' 49.2" N<br />122° 25' 09.6" W</div>
+              <div class="field-coordinate coord-a">37° 46' 49.2\" N<br />122° 25' 09.6\" W</div>
               <div class="field-coordinate coord-b">FIELD 01<br /><span>AMBIENT MAP · NOT TX ROUTING</span></div>
               <div class="field-scan"></div>
               <div class="field-footer"><span><i class="legend-dot cyan"></i> OBSERVER</span><span><i class="legend-dot pink"></i> SIMULATION</span><span class="field-footer-right">VISUAL INDEX / 01</span></div>
@@ -88,6 +95,34 @@
           <div class="table-foot"><span><i class="legend-dot cyan"></i> <span id="shown-count">0</span> OBSERVATIONS SHOWN</span><span>RAW APPEND-ONLY LOG · <code>logs/hits.jsonl</code></span><span class="table-foot-right">POLLING EVERY 5 SEC</span></div>
         </section>
 
+        <section id="fork" class="panel fork-panel" aria-labelledby="fork-title">
+          <div class="panel-head activity-head">
+            <div>
+              <div class="panel-kicker">EVIDENCE / 05</div>
+              <h2 id="fork-title">Fork quality <span id="fork-window-chip" class="count-chip">0</span></h2>
+            </div>
+            <div class="activity-tools"><span id="fork-window-note">WINDOW —</span></div>
+          </div>
+          <div class="fork-body">
+            <div id="fork-rollup" class="fork-rollup" aria-live="polite"></div>
+            <div class="fork-aside">
+              <p id="fork-rollup-note" class="fork-note">Waiting for the first observation.</p>
+              <dl class="fork-stats">
+                <div><dt>MEDIAN LAG</dt><dd id="fork-lag-median">—</dd></div>
+                <div><dt>MAX LAG</dt><dd id="fork-lag-max">—</dd></div>
+                <div><dt>STABILITY CHECKED</dt><dd id="fork-checked">—</dd></div>
+              </dl>
+              <ul class="fork-legend">
+                <li><b class="fk-chip" data-kind="candidate">candidate</b><span>Call succeeded at the fork head and at the reference block.</span></li>
+                <li><b class="fk-chip" data-kind="state_dependent">state_dependent</b><span>Outcome changes when only the block changes, so it is not a plain candidate.</span></li>
+                <li><b class="fk-chip" data-kind="stale_fork">stale_fork</b><span>The fork trailed the provider by more than the allowed lag.</span></li>
+                <li><b class="fk-chip" data-kind="no_code">no_code</b><span>The target held no contract code, so the call could not have been real.</span></li>
+                <li><b class="fk-chip" data-kind="sim_failed">sim_failed</b><span>The replay reverted; the decoded reason is in the record when available.</span></li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
         <section id="method" class="method-strip">
           <div><span class="method-number">01</span><b>OBSERVE</b><small>Pending transaction hash</small></div><span class="method-arrow">→</span>
           <div><span class="method-number">02</span><b>IDENTIFY</b><small>Configured 4-byte selector</small></div><span class="method-arrow">→</span>
@@ -100,4 +135,3 @@
     </div>
   </body>
 </html>
-

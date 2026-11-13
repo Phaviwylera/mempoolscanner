@@ -7,6 +7,9 @@ Type=simple
 User=mempolscan
 Group=mempolscan
 WorkingDirectory=/opt/mempoolscanner
+# Optional: the API reads FORK_MAX_LAG and FORK_POLL_SECONDS from the same file
+# the scanner uses so the reported thresholds match what is actually running.
+EnvironmentFile=-/opt/mempoolscanner/.env
 Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/usr/bin/python3 /opt/mempoolscanner/deploy/hits_api.py
 Restart=always
