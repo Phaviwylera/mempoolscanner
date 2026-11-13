@@ -7,8 +7,18 @@ REPO_SLUG="Phaviwylera/mempoolscanner"
 id -u mempolscan >/dev/null 2>&1 || useradd --system --create-home --home-dir /home/mempolscan --shell /bin/bash mempolscan
 
 export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev ca-certificates curl git jq nginx python3
+missing_pkgs=false
+for cmd in curl git jq nginx python3; do
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    missing_pkgs=true
+    break
+  fi
+done
+if [[ "$missing_pkgs" == true ]]; then
+  apt-get -o DPkg::Lock::Timeout=120 update
+  apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends \
+    ca-certificates curl git jq nginx python3
+fi
 
 install -d -o mempolscan -g mempolscan -m 0750 "$ROOT/logs"
 install -d -o root -g root -m 0755 "$ROOT/bin"
@@ -17,11 +27,15 @@ if [[ ! -f "$ROOT/.env" ]]; then
   install -o mempolscan -g mempolscan -m 0600 "$ROOT/.env.example" "$ROOT/.env"
 fi
 
-SHA="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+# Read commit SHA as repo owner `mempolscan` (with safe.directory fallback) so running
+# setup_host.sh under sudo/root never hits Git's dubious-ownership check.
+SHA="$(runuser -u mempolscan -- git -C "$ROOT" rev-parse HEAD 2>/dev/null \
+  || git -c safe.directory="$ROOT" -C "$ROOT" rev-parse HEAD 2>/dev/null \
+  || echo unknown)"
 BIN="$ROOT/bin/mempool-scanner"
 
 need_install=true
-if [[ -x "$BIN" ]] && "$BIN" --version 2>/dev/null | grep -q "$SHA"; then
+if [[ "$SHA" != "unknown" ]] && [[ -x "$BIN" ]] && "$BIN" --version 2>/dev/null | grep -q "$SHA"; then
   need_install=false
 fi
 
@@ -31,13 +45,20 @@ if [[ "$need_install" == true ]]; then
   trap 'rm -rf "$TMP_DIR"' EXIT
 
   if [[ "$SHA" != "unknown" ]] && \
-     curl -fsSL "${RELEASE_BASE}/mempool-scanner-linux-x86_64" -o "${TMP_DIR}/mempool-scanner" && \
-     curl -fsSL "${RELEASE_BASE}/mempool-scanner-linux-x86_64.sha256" -o "${TMP_DIR}/mempool-scanner.sha256"; then
-    (cd "$TMP_DIR" && sha256sum -c mempool-scanner.sha256)
-    install -o root -g root -m 0755 "${TMP_DIR}/mempool-scanner" "$BIN"
+     curl --retry 5 --retry-delay 2 --retry-all-errors -fsSL \
+       "${RELEASE_BASE}/mempool-scanner-linux-x86_64" \
+       -o "${TMP_DIR}/mempool-scanner-linux-x86_64" && \
+     curl --retry 5 --retry-delay 2 --retry-all-errors -fsSL \
+       "${RELEASE_BASE}/mempool-scanner-linux-x86_64.sha256" \
+       -o "${TMP_DIR}/mempool-scanner-linux-x86_64.sha256"; then
+    (cd "$TMP_DIR" && sha256sum -c mempool-scanner-linux-x86_64.sha256)
+    install -o root -g root -m 0755 "${TMP_DIR}/mempool-scanner-linux-x86_64" "$BIN"
     echo "Installed prebuilt mempool-scanner for ${SHA}"
   else
     echo "No prebuilt release artifact for ${SHA}; building from source with Cargo..."
+    apt-get -o DPkg::Lock::Timeout=120 update
+    apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends \
+      build-essential pkg-config libssl-dev ca-certificates
     CARGO_BIN="/home/mempolscan/.cargo/bin/cargo"
     if [[ ! -x "$CARGO_BIN" ]]; then
       runuser -u mempolscan -- env HOME=/home/mempolscan bash -lc \

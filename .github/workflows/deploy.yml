@@ -98,7 +98,10 @@ jobs:
           echo "$invocation" | jq -r '.StandardOutputContent'
           status="$(echo "$invocation" | jq -r '.Status')"
           if [[ "$status" != "Success" ]]; then
-            echo "$invocation" | jq -r '.StandardErrorContent' >&2
+            err_out="$(echo "$invocation" | jq -r '.StandardErrorContent')"
+            std_out="$(echo "$invocation" | jq -r '.StandardOutputContent')"
+            echo "$err_out" >&2
+            python3 -c 'import sys; [print("::error::"+l[:350]) for l in sys.stdin.read().splitlines()[-20:] if l.strip()]' <<<"${std_out}"$'\n'"${err_out}"
             exit 1
           fi
 
@@ -124,6 +127,9 @@ jobs:
           status="$(echo "$invocation" | jq -r '.Status')"
           if [[ "$status" != "Success" ]]; then
             echo "Verification finished with status: ${status}" >&2
-            echo "$invocation" | jq -r '.StandardErrorContent' >&2
+            err_out="$(echo "$invocation" | jq -r '.StandardErrorContent')"
+            std_out="$(echo "$invocation" | jq -r '.StandardOutputContent')"
+            echo "$err_out" >&2
+            python3 -c 'import sys; [print("::error::"+l[:350]) for l in sys.stdin.read().splitlines()[-20:] if l.strip()]' <<<"${std_out}"$'\n'"${err_out}"
             exit 1
           fi

@@ -67,7 +67,7 @@ impl Settings {
             max_lag: read_u64("FORK_MAX_LAG", 3, 0),
             depth: read_u64("FORK_CHECK_DEPTH", 1, 0),
             poll_seconds: read_f64("FORK_POLL_SECONDS", 3.0, 0.5),
-            worker_concurrency: read_u64("WORKER_CONCURRENCY", 16, 1) as usize,
+            worker_concurrency: read_u64("WORKER_CONCURRENCY", 8, 1) as usize,
             sim_timeout_ms: read_u64("SIM_TIMEOUT_MS", 6_000, 500),
         })
     }

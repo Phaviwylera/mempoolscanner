@@ -614,7 +614,7 @@ fn score_probe(
             net_profit_wei: net.to_string(),
             probe_token_gains: probe.actor_token_transfers,
             verdict: format!(
-                "WOULD FRONT-RUN ({mode}) · est. +{eth_display:.5} ETH net after gas & 90% builder bribe"
+                "READ-ONLY EXTRACTABLE ({mode}) · counterfactual replay est. +{eth_display:.5} ETH net"
             ),
         }
     } else if gross_wei == 0 && probe.actor_token_transfers > 0 {
@@ -632,7 +632,7 @@ fn score_probe(
             net_profit_wei: "0".to_string(),
             probe_token_gains: probe.actor_token_transfers,
             verdict: format!(
-                "EXTRACTABLE ({mode}) · probe captured {} unpriced ERC-20 transfer(s)",
+                "READ-ONLY EXTRACTABLE ({mode}) · counterfactual replay observed {} unpriced ERC-20 transfer(s)",
                 probe.actor_token_transfers
             ),
         }

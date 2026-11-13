@@ -9,6 +9,7 @@ if systemctl list-unit-files --type=service | grep -q '^mempolscan-anvil.service
   systemctl disable --now mempolscan-anvil.service || true
 fi
 
+systemctl reset-failed mempolscan-api.service || true
 systemctl enable --now mempolscan-api.service
 systemctl restart mempolscan-api.service
 systemctl reload nginx
@@ -28,6 +29,7 @@ if ! curl --silent --show-error --fail 'http://127.0.0.1/api/quality?limit=1' >/
   exit 1
 fi
 
+systemctl reset-failed mempolscan.service || true
 systemctl enable mempolscan.service
 systemctl restart mempolscan.service
 sleep 3
