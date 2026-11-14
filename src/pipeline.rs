@@ -23,7 +23,8 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, Mutex, Semaphore};
 use tracing::{debug, error, info, warn};
@@ -1012,7 +1013,7 @@ fn dispatch_full_tx(
                     LiquidationOpportunity::from_hit_record(&record, &decoded, &observed);
                 opportunity.chain_id = cfg.chain_id;
                 // Store the opportunity so /api/execute can look it up later
-                recent_opportunities.write().expect("recent_opportunities lock").insert(opportunity.id.clone(), opportunity.clone());
+                recent_opportunities.write().await.insert(opportunity.id.clone(), opportunity.clone());
                 match execute_liquidation(&cfg, &opportunity).await {
                     Ok(outcome) => {
                         info!("execution {} -> {:?}", opportunity.id, outcome)
