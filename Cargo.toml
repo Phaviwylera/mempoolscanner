@@ -63,7 +63,7 @@ bytes = "1.0"
 
 # HTTP API server for the execution UI
 axum = "0.8"
-tower-http = { version = "0.6", features = ["fs"] }
+tower-http = { version = "0.6", features = ["fs", "cors"] }
 tokio-tungstenite = "0.21"
 
 [profile.release]

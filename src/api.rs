@@ -27,6 +27,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 use tracing::{info, warn};
 
@@ -110,19 +111,75 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     let state = Arc::new(state);
 
+    // Permissive CORS so the Vite dev server (http://localhost:5173) can reach
+    // the API on :3000. `Any` origin forbids credentialed requests by design;
+    // this server accepts no cookies and no private keys, so that is correct.
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     Router::new()
         // --- Static file serving (web UI) — ServeDir at / serves files from web/.
         .route_service("/", ServeDir::new("web"))
         // --- JSON API ---
         .route("/api/hits", get(get_hits))
         .route("/api/quality", get(get_quality))
+        .route("/api/opportunities", get(get_opportunities))
         .route("/api/liquidations", get(get_liquidations))
         .route("/api/execute", post(post_execute))
         .route("/api/keepers", get(get_keepers))
         .route("/api/audit-logs", get(get_audit_logs))
         .route("/api/audit-logs/download", get(download_audit_logs))
         .route("/api/last-exec", get(get_last_exec))
+        .layer(cors)
         .with_state(state)
+}
+
+/// GET /api/opportunities — live snapshot of the in-memory
+/// `recent_opportunities` map that the Aave V3 keeper writes to.
+///
+/// This is deliberately distinct from `/api/liquidations`, which reads the
+/// on-disk `logs/` snapshot: this endpoint reflects keeper state as of the
+/// current poll, with no filesystem round-trip. Supports `?limit=N`
+/// (default 100); richest bounty first, id as a stable tie-break.
+async fn get_opportunities(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Json<Value> {
+    let limit: usize = params
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100);
+
+    let guard = state.recent_opportunities.read().await;
+
+    let mut sorted: Vec<&LiquidationOpportunity> = guard.values().collect();
+    sorted.sort_by(|a, b| {
+        b.gross_profit_wei
+            .cmp(&a.gross_profit_wei)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    let total = sorted.len();
+    let liquidatable = sorted
+        .iter()
+        .filter(|o| o.borrower.is_some())
+        .count();
+
+    let opportunities: Vec<Value> = sorted
+        .into_iter()
+        .take(limit)
+        .map(|o| serde_json::to_value(o).unwrap_or(Value::Null))
+        .collect();
+
+    Json(json!({
+        "opportunities": opportunities,
+        "count": opportunities.len(),
+        "total": total,
+        "liquidatable_count": liquidatable,
+        "status": "live",
+    }))
 }
 
 /// GET /api/hits — read `logs/hits.jsonl` and return recent hits as JSON.
