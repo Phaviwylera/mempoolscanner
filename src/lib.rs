@@ -1,6 +1,7 @@
 //! Read-only Ethereum mempool scanner powered by Alloy and in-process Revm.
 
 pub mod abi;
+pub mod api;
 pub mod config;
 pub mod exec;
 pub mod liquidation;

@@ -31,6 +31,14 @@
     simTarget: { ...ALICE_PRESET },
     shockPct: -30,
     closeFactor: 0.5,
+    // Wallet / execution state
+    wallet: {
+      connected: false,
+      address: null,
+      chainId: null,
+    },
+    execMode: false, // true when --execute is active on the server
+    auditEntries: [],
   };
 
   const inrFmt = new Intl.NumberFormat('en-IN', {
@@ -63,7 +71,151 @@
     return `${hex.slice(0, 8)}…${hex.slice(-4)}`;
   }
 
-  function hfBand(hf) {
+  // --- Wallet connection (MetaMask / injected provider) ---
+async function connectWallet() {
+  if (!window.ethereum) {
+    alert('MetaMask not detected. Please install MetaMask to connect a wallet.');
+    return;
+  }
+  try {
+    const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+    const chainId = await window.ethereum.request({ method: 'eth_chainId' });
+    state.wallet.connected = true;
+    state.wallet.address = accounts[0];
+    state.wallet.chainId = parseInt(chainId, 16);
+    updateWalletUI();
+    // Listen for account changes
+    window.ethereum.on('accountsChanged', (accs) => {
+      if (accs.length === 0) {
+        disconnectWallet();
+      } else {
+        state.wallet.address = accs[0];
+        updateWalletUI();
+      }
+    });
+    window.ethereum.on('chainChanged', () => window.location.reload());
+    infoLog('Wallet connected: ' + shortHex(state.wallet.address));
+  } catch (err) {
+    console.error('Wallet connect failed:', err);
+    alert('Failed to connect wallet: ' + err.message);
+  }
+}
+
+function disconnectWallet() {
+  state.wallet.connected = false;
+  state.wallet.address = null;
+  state.wallet.chainId = null;
+  updateWalletUI();
+  infoLog('Wallet disconnected');
+}
+
+function updateWalletUI() {
+  const connectBtn = $('wallet-connect');
+  const disconnectBtn = $('wallet-disconnect');
+  const walletBar = $('wallet-bar');
+  const walletAddr = $('wallet-address');
+  if (!connectBtn || !disconnectBtn || !walletBar || !walletAddr) return;
+
+  if (state.wallet.connected && state.wallet.address) {
+    connectBtn.style.display = 'none';
+    walletBar.style.display = 'flex';
+    walletAddr.textContent = shortHex(state.wallet.address);
+    // Show chain
+    const chainName = state.wallet.chainId === 1 ? 'ETHEREUM MAINNET' : 'CHAIN ' + state.wallet.chainId;
+    walletAddr.title = chainName;
+  } else {
+    connectBtn.style.display = 'inline-block';
+    walletBar.style.display = 'none';
+    walletAddr.textContent = '—';
+  }
+}
+
+function infoLog(msg) {
+  const el = $('liq-feed-status');
+  if (el) {
+    const b = el.querySelector('b');
+    if (b) b.textContent = msg;
+  }
+}
+
+// --- Execution: call POST /api/execute ---
+async function executeLiquidation(opportunityId) {
+  if (!state.wallet.connected || !state.wallet.address) {
+    alert('Please connect your wallet before executing.');
+    return;
+  }
+  if (!confirm('Execute liquidation for ' + shortHex(opportunityId) + '?\nThis will sign and broadcast via Flashbots/MEV-Share using the operator key. Real funds at risk.')) {
+    return;
+  }
+  try {
+    const resp = await fetch('/api/execute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ opportunity_id: opportunityId }),
+    });
+    const data = await resp.json();
+    if (data.success) {
+      infoLog('EXECUTED: ' + shortHex(data.tx_hash || '—') + ' · ' + data.outcome);
+      fetchAuditLogs();
+    } else {
+      alert('Execution failed: ' + (data.error || 'unknown error'));
+    }
+  } catch (err) {
+    alert('Execution request failed: ' + err.message);
+  }
+}
+
+// --- Audit log ---
+async function fetchAuditLogs() {
+  try {
+    const resp = await fetch('/api/audit-logs', { cache: 'no-store' });
+    if (!resp.ok) return;
+    const data = await resp.json();
+    state.auditEntries = Array.isArray(data.entries) ? data.entries : [];
+    renderAuditLogs();
+  } catch (_err) {
+    // silent
+  }
+}
+
+function renderAuditLogs() {
+  const body = $('audit-body');
+  const countEl = $('audit-count');
+  if (!body || !countEl) return;
+  body.replaceChildren();
+  countEl.textContent = state.auditEntries.length + ' entries';
+
+  for (const entry of state.auditEntries.slice(0, 50).reverse()) {
+    const tr = document.createElement('tr');
+    const ts = document.createElement('td');
+    ts.textContent = entry.timestamp ? entry.timestamp.slice(11, 19) : '—';
+    const id = document.createElement('td');
+    id.textContent = shortHex(entry.opportunity_id);
+    const chain = document.createElement('td');
+    chain.textContent = entry.chain_id || '1';
+    const profit = document.createElement('td');
+    profit.textContent = entry.profit_estimate_wei ? '+' + entry.profit_estimate_wei + ' wei' : '—';
+    const tx = document.createElement('td');
+    if (entry.tx_hash) {
+      const a = document.createElement('a');
+      a.className = 'tx-link';
+      a.href = 'https://etherscan.io/tx/' + encodeURIComponent(entry.tx_hash);
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.textContent = shortHex(entry.tx_hash);
+      tx.appendChild(a);
+    } else {
+      tx.textContent = '—';
+    }
+    const outcome = document.createElement('td');
+    outcome.textContent = entry.outcome || '—';
+    outcome.className = entry.outcome === 'confirmed' ? 'liq-bounty-pos' : (entry.outcome === 'dry_run_signed' ? 'liq-bounty-proj' : '');
+    tr.append(ts, id, chain, profit, tx, outcome);
+    body.appendChild(tr);
+  }
+}
+
+function hfBand(hf) {
     if (!Number.isFinite(hf)) return 'healthy';
     if (hf < 1.0) return 'liquidatable';
     if (hf < 1.05) return 'critical';
@@ -428,7 +580,25 @@
       });
       tdAct.append(chip, simBtn);
 
-      tr.append(tdUser, tdHf, tdCol, tdDebt, tdLt, tdTrig, tdCover, tdBounty, tdAct);
+      // 10. REALRUN button — only when liquidatable (HF < 1.0) and wallet connected
+      const tdRun = document.createElement('td');
+      const runBtn = document.createElement('button');
+      runBtn.type = 'button';
+      runBtn.className = 'liq-realrun-btn';
+      const canRun = hf < 1.0 && state.wallet.connected;
+      runBtn.disabled = !canRun;
+      runBtn.textContent = canRun ? 'REALRUN' : state.wallet.connected ? 'NOT LIQUIDATABLE' : 'CONNECT WALLET';
+      runBtn.title = canRun
+        ? 'Sign and broadcast liquidation via Flashbots/MEV-Share (real funds at risk)'
+        : hf < 1.0 ? 'Connect wallet to enable execution' : 'Position not liquidatable (HF >= 1.0)';
+      runBtn.addEventListener('click', () => {
+        if (canRun) {
+          executeLiquidation(pos.user || '');
+        }
+      });
+      tdRun.appendChild(runBtn);
+
+      tr.append(tdUser, tdHf, tdCol, tdDebt, tdLt, tdTrig, tdCover, tdBounty, tdAct, tdRun);
       tbody.appendChild(tr);
     }
   }
@@ -705,6 +875,30 @@
     $('liq-refresh-btn')?.addEventListener('click', () => refreshData());
     $('liq-filter-btn')?.addEventListener('click', cycleFilter);
     $('liq-table-filter-btn')?.addEventListener('click', cycleFilter);
+
+    // Wallet connect / disconnect
+    $('wallet-connect')?.addEventListener('click', connectWallet);
+    $('wallet-disconnect')?.addEventListener('click', disconnectWallet);
+
+    // Audit log toggle
+    const auditToggle = $('audit-toggle');
+    const auditPanel = $('audit-panel');
+    if (auditToggle && auditPanel) {
+      auditToggle.addEventListener('click', () => {
+        const showing = auditPanel.style.display !== 'none';
+        auditPanel.style.display = showing ? 'none' : 'block';
+        if (!showing) fetchAuditLogs();
+        auditToggle.textContent = showing ? 'AUDIT ↓' : 'AUDIT ↑';
+      });
+    }
+
+    // Audit log download
+    $('audit-download')?.addEventListener('click', () => {
+      window.location.href = '/api/audit-logs/download';
+    });
+
+    // Poll audit logs every 10 seconds
+    setInterval(fetchAuditLogs, 10000);
 
     const slider = $('sim-shock-range');
     slider?.addEventListener('input', () => {
