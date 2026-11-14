@@ -9,7 +9,7 @@
 
 use crate::exec::{ExecOutcome, LiquidationOpportunity};
 use crate::state::{BlockSnapshot, PinnedStateView, RpcStateBackend, StateBackend};
-use alloy::primitives::{B256, U256};
+use alloy::primitives::{Address, Bytes, B256, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use anyhow::{anyhow, Result};
 use revm::context::TxEnv;
@@ -74,11 +74,55 @@ pub async fn simulate_with_backend(
 }
 
 /// Execute the opportunity's calldata in `revm` at `block` and return gas used.
+///
+/// Kept for the signing gate, which only needs gas and treats a revert as
+/// "gas spent". Anything that must distinguish success from revert should call
+/// [`simulate_raw_call`] instead.
 async fn simulate_gas_used(
     backend: Arc<dyn StateBackend>,
     block: u64,
     opportunity: LiquidationOpportunity,
 ) -> Result<u64> {
+    let sim = simulate_raw_call(
+        backend,
+        block,
+        opportunity.from,
+        opportunity.to,
+        opportunity.calldata.clone(),
+        opportunity.value,
+        opportunity.gas_limit,
+    )
+    .await?;
+    Ok(sim.gas_used)
+}
+
+/// Full result of one `revm` call: enough detail to report exactly what the
+/// EVM did, rather than collapsing a revert into a gas number.
+#[derive(Clone, Debug)]
+pub struct RawSimulation {
+    pub success: bool,
+    pub gas_used: u64,
+    /// Return data on success, or the revert payload on failure.
+    pub output: Bytes,
+    /// Decoded revert/halt description, when the call did not succeed.
+    pub failure: Option<String>,
+    /// Emitted logs (empty on revert). `(address, topics, data)` per log.
+    pub logs: Vec<(Address, Vec<B256>, Bytes)>,
+}
+
+/// Execute an arbitrary call in `revm` against forked state at `block`.
+///
+/// Read-only: the EVM runs in-process against a `CacheDB` over the state
+/// backend. Nothing is signed and nothing is broadcast.
+pub async fn simulate_raw_call(
+    backend: Arc<dyn StateBackend>,
+    block: u64,
+    from: Address,
+    to: Address,
+    calldata: Bytes,
+    value: U256,
+    gas_limit: u64,
+) -> Result<RawSimulation> {
     let snap = BlockSnapshot {
         number: block,
         ..Default::default()
@@ -118,20 +162,43 @@ async fn simulate_gas_used(
             .build_mainnet();
 
         let tx_env = TxEnv::builder()
-            .caller(opportunity.from)
-            .kind(TxKind::Call(opportunity.to))
-            .data(opportunity.calldata.clone())
-            .value(opportunity.value)
-            .gas_limit(opportunity.gas_limit.max(21_000))
+            .caller(from)
+            .kind(TxKind::Call(to))
+            .data(calldata)
+            .value(value)
+            .gas_limit(gas_limit.max(21_000))
             .gas_price(0)
             .build()
             .map_err(|e| anyhow!("invalid tx env: {e}"))?;
 
         match evm.transact(tx_env) {
             Ok(exec) => match exec.result {
-                ExecutionResult::Success { gas, .. } => Ok(gas.tx_gas_used()),
-                ExecutionResult::Revert { gas, .. } => Ok(gas.tx_gas_used()),
-                ExecutionResult::Halt { gas, .. } => Ok(gas.tx_gas_used()),
+                ExecutionResult::Success {
+                    gas, output, logs, ..
+                } => Ok(RawSimulation {
+                    success: true,
+                    gas_used: gas.tx_gas_used(),
+                    output: output.into_data(),
+                    failure: None,
+                    logs: logs
+                        .into_iter()
+                        .map(|l| (l.address, l.topics().to_vec(), l.data.data))
+                        .collect(),
+                }),
+                ExecutionResult::Revert { gas, output, .. } => Ok(RawSimulation {
+                    success: false,
+                    gas_used: gas.tx_gas_used(),
+                    failure: Some(describe_revert(&output)),
+                    output,
+                    logs: Vec::new(),
+                }),
+                ExecutionResult::Halt { gas, reason, .. } => Ok(RawSimulation {
+                    success: false,
+                    gas_used: gas.tx_gas_used(),
+                    output: Bytes::new(),
+                    failure: Some(format!("halted: {reason:?}")),
+                    logs: Vec::new(),
+                }),
             },
             Err(evm_err) => Err(anyhow!("revm error: {evm_err}")),
         }
@@ -140,6 +207,21 @@ async fn simulate_gas_used(
     .map_err(|e| anyhow!("revm task join error: {e}"))??;
 
     Ok(joined)
+}
+
+/// Turn revert bytes into a human-readable reason.
+///
+/// Reuses the project's existing `Error(string)` / `Panic(uint256)` decoder.
+/// Aave V3 reverts carry numeric strings (e.g. "45" =
+/// HEALTH_FACTOR_NOT_BELOW_THRESHOLD), so the raw string is preserved as-is.
+fn describe_revert(output: &Bytes) -> String {
+    if output.is_empty() {
+        return "reverted without a reason string".to_string();
+    }
+    match crate::abi::decode_revert_bytes(output) {
+        Some((kind, reason)) => format!("{kind}: {reason}"),
+        None => format!("reverted with {} bytes of undecodable data", output.len()),
+    }
 }
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, CircleAlert } from "lucide-react";
+import { Activity, CircleAlert, X } from "lucide-react";
 import Header from "./components/Header";
 import AtomicSequence from "./components/AtomicSequence";
 import PositionsTable from "./components/PositionsTable";
@@ -10,9 +10,11 @@ import {
   fetchLiquidations,
   fetchOpportunities,
   joinRows,
+  simulate,
   type LiquidationsResponse,
   type OpportunitiesResponse,
   type Row,
+  type SimulationResult,
 } from "./lib/api";
 
 const POLL_MS = 5000;
@@ -23,6 +25,11 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [lastOk, setLastOk] = useState<Date | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+
+  // Simulation results keyed by borrower, so switching rows keeps each result.
+  const [sims, setSims] = useState<Record<string, SimulationResult>>({});
+  const [simulatingUser, setSimulatingUser] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
 
   // Keeps the poll from stacking requests if the backend is slow.
   const inFlight = useRef(false);
@@ -58,6 +65,25 @@ export default function App() {
     };
   }, [poll]);
 
+  const onSimulate = useCallback(async (user: string) => {
+    setSelected(user);
+    setSimulatingUser(user);
+    setToast(null);
+    try {
+      const result = await simulate(user);
+      setSims((prev) => ({ ...prev, [user]: result }));
+      if (!result.success) {
+        setToast(result.error ?? "Simulation failed for an unknown reason.");
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setSims((prev) => ({ ...prev, [user]: { success: false, error: msg } }));
+      setToast(msg);
+    } finally {
+      setSimulatingUser(null);
+    }
+  }, []);
+
   const rows: Row[] = useMemo(
     () => joinRows(liq?.positions ?? [], opps?.opportunities ?? []),
     [liq, opps],
@@ -68,6 +94,7 @@ export default function App() {
     [rows, selected],
   );
 
+  const selectedSim = selected ? (sims[selected] ?? null) : null;
   const live = error === null && liq !== null;
 
   return (
@@ -120,11 +147,13 @@ export default function App() {
       {/* 60 / 40 split */}
       <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-5">
         <div className="flex flex-col gap-4 lg:col-span-3">
-          <AtomicSequence row={selectedRow} />
+          <AtomicSequence row={selectedRow} sim={selectedSim} />
           <PositionsTable
             rows={rows}
             selected={selected}
             onSelect={setSelected}
+            onSimulate={(u) => void onSimulate(u)}
+            simulatingUser={simulatingUser}
           />
         </div>
 
@@ -134,6 +163,20 @@ export default function App() {
           <RecentLiquidations items={liq?.recent_liquidations ?? []} />
         </div>
       </div>
+
+      {toast ? (
+        <div className="fixed bottom-4 right-4 z-50 flex max-w-md items-start gap-2 rounded-lg border border-risk/50 bg-card px-4 py-3 text-[11px] text-risk shadow-lg">
+          <CircleAlert size={14} className="mt-px shrink-0" />
+          <span className="flex-1 break-words">{toast}</span>
+          <button
+            onClick={() => setToast(null)}
+            aria-label="Dismiss"
+            className="shrink-0 text-muted transition-colors hover:text-ink"
+          >
+            <X size={13} />
+          </button>
+        </div>
+      ) : null}
 
       <p className="mt-4 text-[10px] leading-relaxed text-muted">
         Positions, health factors and plan math come from{" "}

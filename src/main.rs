@@ -81,7 +81,10 @@ async fn main() -> Result<()> {
     let recent_opportunities: Arc<RwLock<HashMap<String, mempool_scanner::exec::LiquidationOpportunity>>> =
         Arc::new(RwLock::new(HashMap::new()));
 
-    let mut api_state = AppState::new();
+    // Point revm state forking and the Chainlink ETH/USD feed at the same HTTP
+    // RPC the keeper uses. Without this, /api/simulate is disabled and fx stays
+    // on the reference price.
+    let mut api_state = AppState::new().with_state_rpc(&settings.state_rpc);
     api_state.recent_opportunities = recent_opportunities.clone();
 
     // --- Keeper: Aave V3 health factor polling ---

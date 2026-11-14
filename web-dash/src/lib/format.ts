@@ -7,6 +7,7 @@
  */
 
 const WEI_PER_ETH = 10n ** 18n;
+const WEI_PER_GWEI = 10n ** 9n;
 
 /** Parse a U256 JSON value ("0x..", decimal string, or number) into a bigint. */
 export function toBigInt(v: string | number | null | undefined): bigint {
@@ -46,6 +47,16 @@ export function formatEth(wei: bigint, decimals = 6): string {
 /** Convenience: raw U256 JSON value straight to an ETH string. */
 export function weiToEth(v: string | number | null | undefined, decimals = 6): string {
   return formatEth(toBigInt(v), decimals);
+}
+
+/** wei -> gwei string, integer math only. For gas prices. */
+export function formatGwei(v: string | number | null | undefined, decimals = 3): string {
+  const wei = toBigInt(v);
+  const whole = wei / WEI_PER_GWEI;
+  const frac = wei % WEI_PER_GWEI;
+  if (decimals <= 0) return whole.toString();
+  const fracStr = frac.toString().padStart(9, "0").slice(0, decimals);
+  return `${whole.toString()}.${fracStr}`;
 }
 
 /** USD with thousands separators. Used for the plan math, which is f64 USD. */

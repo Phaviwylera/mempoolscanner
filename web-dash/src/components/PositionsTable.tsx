@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { ArrowDownWideNarrow } from "lucide-react";
+import { ArrowDownWideNarrow, LoaderCircle, FlaskConical } from "lucide-react";
 import {
   BAND_BAR,
   BAND_TEXT,
@@ -50,10 +50,15 @@ export default function PositionsTable({
   rows,
   selected,
   onSelect,
+  onSimulate,
+  simulatingUser,
 }: {
   rows: Row[];
   selected: string | null;
   onSelect: (user: string) => void;
+  onSimulate: (user: string) => void;
+  /** Address currently being simulated, for the per-row spinner. */
+  simulatingUser: string | null;
 }) {
   // Sort by highest bounty, per spec. Keeper wei bounty (exact, BigInt) ranks
   // above the snapshot's USD estimate; ties fall back to lowest health factor.
@@ -94,12 +99,13 @@ export default function PositionsTable({
               <th className="px-3 py-2 text-right font-normal">Liq. Thr.</th>
               <th className="px-3 py-2 text-right font-normal">Est. Flash Bounty</th>
               <th className="px-3 py-2 font-normal">Status</th>
+              <th className="px-3 py-2 text-right font-normal">Simulate</th>
             </tr>
           </thead>
           <tbody>
             {sorted.length === 0 ? (
               <tr>
-                <td colSpan={7} className="px-4 py-8 text-center text-muted">
+                <td colSpan={8} className="px-4 py-8 text-center text-muted">
                   No positions in the snapshot yet.
                 </td>
               </tr>
@@ -107,6 +113,7 @@ export default function PositionsTable({
 
             {sorted.map((r) => {
               const isSel = selected !== null && selected === r.user;
+              const busy = simulatingUser === r.user;
               return (
                 <tr
                   key={r.user}
@@ -150,6 +157,25 @@ export default function PositionsTable({
                   </td>
                   <td className="px-3 py-2">
                     <StatusPill row={r} />
+                  </td>
+                  <td className="px-3 py-2 text-right">
+                    <button
+                      onClick={(e) => {
+                        // Do not let the click also re-trigger row selection.
+                        e.stopPropagation();
+                        onSimulate(r.user);
+                      }}
+                      disabled={busy}
+                      title="Run a revm fork simulation for this borrower"
+                      className="inline-flex items-center gap-1 rounded border border-edge bg-edge/40 px-2 py-1 text-[10px] text-ink transition-colors hover:bg-edge disabled:opacity-50"
+                    >
+                      {busy ? (
+                        <LoaderCircle size={11} className="animate-spin" />
+                      ) : (
+                        <FlaskConical size={11} />
+                      )}
+                      {busy ? "Simulating" : "Simulate"}
+                    </button>
                   </td>
                 </tr>
               );

@@ -37,6 +37,7 @@ pub use broadcast::broadcast_and_confirm;
 pub use sign::load_signer_from_env;
 pub use simulate::simulate_liquidation;
 pub use simulate::simulate_with_backend;
+pub use simulate::{simulate_raw_call, RawSimulation};
 
 /// A liquidation opportunity detected by the scanner's pattern-match stage.
 #[derive(Clone, Debug, Serialize, Deserialize)]

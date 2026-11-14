@@ -12,14 +12,22 @@
 //! `src/exec/broadcast.rs`.
 
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
 use chrono::Utc;
-use crate::exec::{execute_liquidation, ExecConfig, ExecOutcome, LiquidationOpportunity};
+use crate::chainlink::ChainlinkEthUsd;
+use crate::exec::{
+    execute_liquidation, simulate_raw_call, ExecConfig, ExecOutcome, LiquidationOpportunity,
+};
+use crate::state::{RpcStateBackend, StateBackend};
+use alloy::primitives::{keccak256, Address, Bytes, U256};
+use alloy::providers::{Provider, ProviderBuilder};
+use alloy::sol;
+use alloy::sol_types::SolCall;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
@@ -44,6 +52,11 @@ pub struct AppState {
     pub recent_opportunities: Arc<RwLock<HashMap<String, LiquidationOpportunity>>>,
     /// Last execution result for the UI to poll.
     pub last_exec: Arc<RwLock<Option<ExecResult>>>,
+    /// HTTP RPC used for revm state forking and the Chainlink read.
+    /// `None` leaves /api/simulate disabled and fx on the reference value.
+    pub state_rpc: Option<String>,
+    /// Cached Chainlink ETH/USD reader. `None` when no RPC is configured.
+    pub eth_usd: Option<Arc<ChainlinkEthUsd>>,
 }
 
 /// Result of a `/api/execute` call, surfaced to the UI.
@@ -75,6 +88,8 @@ impl AppState {
             exec_config: None,
             recent_opportunities: Arc::new(RwLock::new(HashMap::new())),
             last_exec: Arc::new(RwLock::new(None)),
+            state_rpc: None,
+            eth_usd: None,
         }
     }
 
@@ -87,7 +102,20 @@ impl AppState {
             exec_config: None,
             recent_opportunities: Arc::new(RwLock::new(HashMap::new())),
             last_exec: Arc::new(RwLock::new(None)),
+            state_rpc: None,
+            eth_usd: None,
         }
+    }
+
+    /// Point revm state forking and the Chainlink feed at an HTTP RPC.
+    /// Failing to build the reader is non-fatal: fx falls back to reference.
+    pub fn with_state_rpc(mut self, rpc_url: &str) -> Self {
+        self.state_rpc = Some(rpc_url.to_string());
+        match ChainlinkEthUsd::new(rpc_url) {
+            Ok(feed) => self.eth_usd = Some(Arc::new(feed)),
+            Err(e) => warn!("chainlink reader unavailable: {e}"),
+        }
+        self
     }
 
     /// Store a detected liquidation opportunity so the API can execute it later.
@@ -136,6 +164,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/opportunities", get(get_opportunities))
         .route("/api/liquidations", get(get_liquidations))
         .route("/api/execute", post(post_execute))
+        // axum 0.8 path params are {braces}; ":address" would panic at startup.
+        .route("/api/simulate/{address}", post(post_simulate))
         .route("/api/keepers", get(get_keepers))
         .route("/api/audit-logs", get(get_audit_logs))
         .route("/api/audit-logs/download", get(download_audit_logs))
@@ -295,10 +325,38 @@ async fn get_liquidations(
         return Json(json!({ "inspected": inspected }));
     }
 
+    // Live Chainlink ETH/USD when a feed is configured and reachable; the old
+    // hardcoded reference value only as a last resort, and labelled as such so
+    // the UI never presents a made-up price as an oracle reading.
+    const USD_INR: f64 = 86.0;
+    const REFERENCE_ETH_USD: f64 = 2650.0;
+
+    let quote = match &state.eth_usd {
+        Some(feed) => feed.quote().await,
+        None => None,
+    };
+    let (eth_usd, fx_source, feed_updated_at, fx_stale) = match &quote {
+        Some(q) => (
+            q.price_usd,
+            if q.stale { "chainlink (stale)" } else { "chainlink" },
+            Some(q.feed_updated_at),
+            q.stale,
+        ),
+        None => (REFERENCE_ETH_USD, "reference", None, false),
+    };
+
     Json(json!({
         "positions": positions,
         "summary": summary,
-        "fx": { "eth_inr": 260000.0, "eth_usd": 2650.0, "usd_inr": 86.0, "source": "reference" },
+        "fx": {
+            "eth_inr": eth_usd * USD_INR,
+            "eth_usd": eth_usd,
+            "usd_inr": USD_INR,
+            "source": fx_source,
+            "stale": fx_stale,
+            "feed_updated_at": feed_updated_at,
+            "feed": crate::chainlink::CHAINLINK_ETH_USD.to_string(),
+        },
         "base_fee_gwei": 1.0,
         "status": "live",
         "discovered_borrowers_total": positions.len(),
@@ -506,6 +564,250 @@ async fn get_keepers(
     Json(json!({
         "keepers": keepers,
         "count": keepers.len(),
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/simulate/{address} — revm liquidation simulation
+// ---------------------------------------------------------------------------
+
+sol! {
+    interface IAaveV3Pool {
+        function liquidationCall(
+            address collateralAsset,
+            address debtAsset,
+            address user,
+            uint256 debtToCover,
+            bool receiveAToken
+        ) external;
+    }
+}
+
+/// `LiquidationCall(address,address,address,uint256,uint256,address,bool)` —
+/// the Aave V3 Pool event reporting the exact amounts actually moved:
+/// (collateralAsset, debtAsset, user) indexed, then debtToCover,
+/// liquidatedCollateralAmount, liquidator, receiveAToken in the data words.
+const LIQUIDATION_CALL_SIG: &[u8] =
+    b"LiquidationCall(address,address,address,uint256,uint256,address,bool)";
+
+/// Optional overrides for a simulation. Needed because a keeper-built
+/// opportunity currently carries `collateral: None` / `debt_asset: None`
+/// (src/keeper.rs), and `liquidationCall` cannot be encoded without both.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct SimulateRequest {
+    pub collateral_asset: Option<String>,
+    pub debt_asset: Option<String>,
+    /// Decimal or 0x-hex U256.
+    pub debt_to_cover: Option<String>,
+    /// Caller to simulate from; defaults to the opportunity's `from`.
+    pub from: Option<String>,
+    pub receive_a_token: Option<bool>,
+}
+
+fn sim_error(msg: impl Into<String>) -> Json<Value> {
+    Json(json!({ "success": false, "error": msg.into() }))
+}
+
+/// POST /api/simulate/{address}
+///
+/// Forks the latest block with `revm` and executes
+/// `Pool.liquidationCall(collateral, debt, user, debtToCover, receiveAToken)`
+/// in-process. Read-only: nothing is signed, nothing is broadcast.
+async fn post_simulate(
+    State(state): State<Arc<AppState>>,
+    Path(address): Path<String>,
+    body: String,
+) -> Json<Value> {
+    let req: SimulateRequest = if body.trim().is_empty() {
+        SimulateRequest::default()
+    } else {
+        match serde_json::from_str(&body) {
+            Ok(r) => r,
+            Err(e) => return sim_error(format!("invalid JSON body: {e}")),
+        }
+    };
+
+    let user: Address = match address.trim().parse() {
+        Ok(a) => a,
+        Err(e) => return sim_error(format!("invalid address {address:?}: {e}")),
+    };
+
+    // --- locate the opportunity (by borrower first, then by id) ---
+    let opportunity = {
+        let guard = state.recent_opportunities.read().await;
+        guard
+            .values()
+            .find(|o| o.borrower == Some(user))
+            .or_else(|| {
+                guard
+                    .values()
+                    .find(|o| o.id.eq_ignore_ascii_case(address.trim()))
+            })
+            .cloned()
+    };
+    let Some(opportunity) = opportunity else {
+        return sim_error("No opportunity found for address");
+    };
+
+    // --- resolve the liquidationCall arguments ---
+    let collateral_asset = match (&req.collateral_asset, opportunity.collateral) {
+        (Some(s), _) => match s.trim().parse::<Address>() {
+            Ok(a) => Some(a),
+            Err(e) => return sim_error(format!("invalid collateral_asset: {e}")),
+        },
+        (None, c) => c,
+    };
+    let debt_asset = match (&req.debt_asset, opportunity.debt_asset) {
+        (Some(s), _) => match s.trim().parse::<Address>() {
+            Ok(a) => Some(a),
+            Err(e) => return sim_error(format!("invalid debt_asset: {e}")),
+        },
+        (None, d) => d,
+    };
+    let debt_to_cover = match (&req.debt_to_cover, opportunity.repay_amount) {
+        (Some(s), _) => match s.trim().parse::<U256>() {
+            Ok(v) => Some(v),
+            Err(e) => return sim_error(format!("invalid debt_to_cover: {e}")),
+        },
+        (None, r) => r,
+    };
+
+    let mut missing: Vec<&str> = Vec::new();
+    if collateral_asset.is_none() {
+        missing.push("collateral_asset");
+    }
+    if debt_asset.is_none() {
+        missing.push("debt_asset");
+    }
+    if debt_to_cover.is_none() {
+        missing.push("debt_to_cover");
+    }
+    if !missing.is_empty() {
+        return Json(json!({
+            "success": false,
+            "error": format!(
+                "cannot encode liquidationCall: missing {}. The keeper records collateral/debt_asset as null, so supply them in the POST body.",
+                missing.join(", ")
+            ),
+            "missing": missing,
+            "opportunity_id": opportunity.id,
+        }));
+    }
+    let (collateral_asset, debt_asset, debt_to_cover) = (
+        collateral_asset.expect("checked above"),
+        debt_asset.expect("checked above"),
+        debt_to_cover.expect("checked above"),
+    );
+
+    let Some(rpc_url) = state.state_rpc.as_deref() else {
+        return sim_error(
+            "no state RPC configured; simulation needs HTTP_RPC or WS_RPC so revm can fork state",
+        );
+    };
+
+    let from = match &req.from {
+        Some(s) => match s.trim().parse::<Address>() {
+            Ok(a) => a,
+            Err(e) => return sim_error(format!("invalid from: {e}")),
+        },
+        None => opportunity.from,
+    };
+    let receive_a_token = req.receive_a_token.unwrap_or(false);
+
+    // --- encode the call ---
+    let calldata: Bytes = IAaveV3Pool::liquidationCallCall {
+        collateralAsset: collateral_asset,
+        debtAsset: debt_asset,
+        user,
+        debtToCover: debt_to_cover,
+        receiveAToken: receive_a_token,
+    }
+    .abi_encode()
+    .into();
+
+    // --- fork latest state ---
+    let provider = match ProviderBuilder::new().connect(rpc_url).await {
+        Ok(p) => p.erased(),
+        Err(e) => return sim_error(format!("rpc connect failed: {e}")),
+    };
+    let block = match provider.get_block_number().await {
+        Ok(b) => b,
+        Err(e) => return sim_error(format!("eth_blockNumber failed: {e}")),
+    };
+    let gas_price_wei: u128 = provider.get_gas_price().await.unwrap_or(1_000_000_000);
+
+    let backend: Arc<dyn StateBackend> = Arc::new(RpcStateBackend::new(provider));
+
+    let sim = match simulate_raw_call(
+        backend,
+        block,
+        from,
+        opportunity.to,
+        calldata,
+        U256::ZERO,
+        opportunity.gas_limit.max(1_000_000),
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => return sim_error(format!("revm simulation failed: {e}")),
+    };
+
+    let gas_cost_wei = U256::from(sim.gas_used).saturating_mul(U256::from(gas_price_wei));
+
+    if !sim.success {
+        warn!(
+            "simulate {user}: reverted at block {block}: {}",
+            sim.failure.as_deref().unwrap_or("unknown")
+        );
+        return Json(json!({
+            "success": false,
+            "error": sim.failure.unwrap_or_else(|| "reverted".to_string()),
+            "address": format!("{user:#x}"),
+            "opportunity_id": opportunity.id,
+            "block_simulated": block,
+            "gas_used": sim.gas_used,
+            "gas_cost_wei": format!("{gas_cost_wei:#x}"),
+        }));
+    }
+
+    // --- read the exact amounts out of the LiquidationCall log ---
+    let topic0 = keccak256(LIQUIDATION_CALL_SIG);
+    let mut collateral_seized: Option<U256> = None;
+    let mut debt_repaid: Option<U256> = None;
+    for (addr, topics, data) in &sim.logs {
+        if *addr == opportunity.to && topics.first() == Some(&topic0) && data.len() >= 64 {
+            debt_repaid = Some(U256::from_be_slice(&data[0..32]));
+            collateral_seized = Some(U256::from_be_slice(&data[32..64]));
+            break;
+        }
+    }
+
+    // Net profit is the keeper's gross payout estimate minus the gas this
+    // simulation actually burned. The seized/repaid figures are raw token units
+    // from the event and are NOT converted to wei: that needs a price per
+    // asset, which this endpoint deliberately does not fetch.
+    let estimated_net_profit_wei = opportunity.gross_profit_wei.saturating_sub(gas_cost_wei);
+
+    Json(json!({
+        "success": true,
+        "address": format!("{user:#x}"),
+        "opportunity_id": opportunity.id,
+        "block_simulated": block,
+        "gas_used": sim.gas_used,
+        "gas_price_wei": format!("{gas_price_wei:#x}"),
+        "gas_cost_wei": format!("{gas_cost_wei:#x}"),
+        "collateral_seized": collateral_seized.map(|v| format!("{v:#x}")),
+        "debt_repaid": debt_repaid.map(|v| format!("{v:#x}")),
+        "liquidation_call_event_found": collateral_seized.is_some(),
+        "estimated_net_profit_wei": format!("{estimated_net_profit_wei:#x}"),
+        "gross_profit_wei": format!("{:#x}", opportunity.gross_profit_wei),
+        "profit_basis": "opportunity gross_profit_wei minus simulated gas cost",
+        "collateral_asset": format!("{collateral_asset:#x}"),
+        "debt_asset": format!("{debt_asset:#x}"),
+        "receive_a_token": receive_a_token,
+        "simulated_from": format!("{from:#x}"),
+        "broadcast": false,
     }))
 }
 

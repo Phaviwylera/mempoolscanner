@@ -77,7 +77,11 @@ export interface Fx {
   eth_inr?: number;
   eth_usd?: number;
   usd_inr?: number;
+  /** "chainlink", "chainlink (stale)" or "reference". */
   source?: string;
+  stale?: boolean;
+  feed_updated_at?: number | null;
+  feed?: string;
 }
 
 /** A row of `recent_liquidations` (on-chain LiquidationCall events). */
@@ -139,6 +143,62 @@ export async function inspectAddress(addr: string, signal?: AbortSignal) {
     signal,
   );
   return r.inspected;
+}
+
+/** Response from POST /api/simulate/{address}. Wei fields are U256 hex. */
+export interface SimulationResult {
+  success: boolean;
+  error?: string;
+  address?: string;
+  opportunity_id?: string;
+  block_simulated?: number;
+  gas_used?: number;
+  gas_price_wei?: string;
+  gas_cost_wei?: string;
+  collateral_seized?: string | null;
+  debt_repaid?: string | null;
+  liquidation_call_event_found?: boolean;
+  estimated_net_profit_wei?: string;
+  gross_profit_wei?: string;
+  profit_basis?: string;
+  collateral_asset?: string;
+  debt_asset?: string;
+  receive_a_token?: boolean;
+  simulated_from?: string;
+  broadcast?: boolean;
+  /** Present when liquidationCall could not be encoded. */
+  missing?: string[];
+}
+
+/** Optional overrides; the keeper records collateral/debt_asset as null. */
+export interface SimulateOverrides {
+  collateral_asset?: string;
+  debt_asset?: string;
+  debt_to_cover?: string;
+  from?: string;
+  receive_a_token?: boolean;
+}
+
+/**
+ * POST /api/simulate/:address — runs a revm fork simulation.
+ * Never throws on a failed simulation: the backend answers 200 with
+ * success:false and a revert reason, which the caller renders.
+ */
+export async function simulate(
+  address: string,
+  overrides: SimulateOverrides = {},
+  signal?: AbortSignal,
+): Promise<SimulationResult> {
+  const res = await fetch(`${API_BASE}/api/simulate/${address}`, {
+    method: "POST",
+    signal,
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify(overrides),
+  });
+  if (!res.ok) {
+    return { success: false, error: `HTTP ${res.status} ${res.statusText}` };
+  }
+  return (await res.json()) as SimulationResult;
 }
 
 /**

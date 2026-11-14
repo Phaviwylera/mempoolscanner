@@ -2,6 +2,7 @@
 
 pub mod abi;
 pub mod api;
+pub mod chainlink;
 pub mod config;
 pub mod exec;
 pub mod keeper;
