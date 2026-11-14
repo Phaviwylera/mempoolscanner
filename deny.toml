@@ -18,16 +18,18 @@ skip = []
 
 [licenses]
 # Allow common permissive licenses used by the dependency tree.
-{ license = "MIT" } = "allow"
-{ license = "Apache-2.0" } = "allow"
-{ license = "MIT OR Apache-2.0" } = "allow"
-{ license = "MIT/Apache-2.0" } = "allow"
-{ license = "BSD-3-Clause" } = "allow"
-{ license = "Unicode-3.0" } = "allow"
-{ license = "Unlicense" } = "allow"
-{ license = "Unlicense/MIT" } = "allow"
-{ license = "ISC" } = "allow"
-{ license = "CDLA-Permissive-2.0" } = "allow"
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "MIT OR Apache-2.0",
+  "MIT/Apache-2.0",
+  "BSD-3-Clause",
+  "Unicode-3.0",
+  "Unlicense",
+  "Unlicense/MIT",
+  "ISC",
+  "CDLA-Permissive-2.0",
+]
 
 [sources]
 
