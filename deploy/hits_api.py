@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 import urllib.request
@@ -981,6 +982,75 @@ def bounded_limit(raw: object, default: int) -> int:
     return min(MAX_LIMIT, max(1, requested))
 
 
+
+# Bounded server-side diagnostic history. Sampling retains observations after the
+# active feed prunes them; it is not a complete transaction or system journal.
+DIAGNOSTIC_LIMIT = 2000
+_diagnostic_lock = threading.Lock()
+_diagnostic_records = {}
+_diagnostic_started = time.time()
+_diagnostic_last_sample = None
+_diagnostic_error = None
+
+
+def redact_diagnostics(value):
+    if isinstance(value, dict):
+        return {
+            k: ("[redacted]" if any(s in k.lower() for s in
+                ("password", "secret", "private_key", "api_key", "authorization"))
+                else redact_diagnostics(v))
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_diagnostics(v) for v in value[:500]]
+    if isinstance(value, str):
+        # RPC errors can contain credentials in URL paths, userinfo or queries.
+        return re.sub(r"""(?:https?|wss?)://[^\s"'<>]+""", "[redacted URL]", value[:8192])
+    return value
+
+
+def record_diagnostics(records):
+    global _diagnostic_last_sample, _diagnostic_error
+    with _diagnostic_lock:
+        for record in reversed(records):
+            clean = redact_diagnostics(record)
+            key = (str(clean.get("hash", "")), str(clean.get("ts", "")))
+            _diagnostic_records[key] = clean
+        while len(_diagnostic_records) > DIAGNOSTIC_LIMIT:
+            del _diagnostic_records[next(iter(_diagnostic_records))]
+        _diagnostic_last_sample = time.time()
+        _diagnostic_error = None
+
+
+def diagnostic_snapshot():
+    with _diagnostic_lock:
+        return {
+            "format": "mempool-diagnostics-v1",
+            "downloaded_at": time.time(),
+            "recording_started_at": _diagnostic_started,
+            "last_sample_at": _diagnostic_last_sample,
+            "sampling_seconds": 1,
+            "limit": DIAGNOSTIC_LIMIT,
+            "note": "Recent sampled active observations; resets on API restart. Not a complete journal.",
+            "recorder_error": _diagnostic_error,
+            "records": list(_diagnostic_records.values()),
+        }
+
+
+def diagnostic_recorder():
+    global _diagnostic_error
+    while True:
+        try:
+            if not LOG_PATH.is_file():
+                raise FileNotFoundError("Observation file unavailable")
+            record_diagnostics(HitsHandler._read_recent(500))
+        except Exception as exc:
+            # Do not export raw exceptions, paths, environment or service logs.
+            with _diagnostic_lock:
+                _diagnostic_error = type(exc).__name__
+        time.sleep(1)
+
+
 class HitsHandler(BaseHTTPRequestHandler):
     server_version = "MempoolReadOnlyAPI/2.0"
 
@@ -996,6 +1066,9 @@ class HitsHandler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def _serve_hits(self, query: dict[str, list[str]]) -> None:
+        if query.get("download") == ["logs"]:
+            self._serve_diagnostics()
+            return
         limit = bounded_limit(query.get("limit", ["50"])[0], 50)
         hits = self._read_recent(limit)
         eth_inr, rate_source = get_live_eth_inr()
@@ -1064,6 +1137,17 @@ class HitsHandler(BaseHTTPRequestHandler):
         payload = json.dumps(res, separators=(",", ":")).encode("utf-8")
         self._send_json(payload)
 
+    def _serve_diagnostics(self) -> None:
+        payload = json.dumps(diagnostic_snapshot(), separators=(",", ":")).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Disposition", 'attachment; filename="mempool-diagnostics.json"')
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(payload)
+
     def _send_json(self, payload: bytes) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -1131,4 +1215,5 @@ class HitsHandler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    threading.Thread(target=diagnostic_recorder, daemon=True, name="diagnostic-recorder").start()
     ThreadingHTTPServer((HOST, PORT), HitsHandler).serve_forever()
