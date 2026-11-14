@@ -2,8 +2,8 @@
 
 [advisories]
 ignore = []
-unmaintained = false
-yanked = false
+unmaintained = "deny"
+yanked = "deny"
 
 [bans]
 skip = []
@@ -14,4 +14,4 @@ skip = []
 
 [graph]
 
-[targets]
+targets = []
