@@ -18,9 +18,8 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use alloy::primitives::{Address, B256, Bytes, TxKind, U256};
-use chrono::{SecondsFormat, Utc};
-use mempool_scanner::exec::{execute_liquidation, ExecConfig, LiquidationOpportunity};
+use chrono::Utc;
+use crate::exec::{execute_liquidation, ExecConfig, ExecOutcome, LiquidationOpportunity};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
@@ -29,7 +28,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::services::ServeDir;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// Shared application state for the API server.
 #[derive(Clone)]
@@ -91,8 +90,12 @@ impl AppState {
     }
 
     /// Store a detected liquidation opportunity so the API can execute it later.
-    pub fn record_opportunity(&self, id: String, opp: LiquidationOpportunity) {
-        let mut guard = self.recent_opportunities.write().expect("recent_opportunities lock");
+    pub async fn record_opportunity(&self, id: String, opp: LiquidationOpportunity) {
+        let mut guard = self
+            .recent_opportunities
+            .write()
+            .await
+            .expect("recent_opportunities lock");
         guard.insert(id, opp);
         // Keep only the most recent 200 opportunities
         if guard.len() > 200 {
@@ -150,8 +153,8 @@ async fn get_hits(
 
 /// GET /api/quality — return scanner quality/telemetry summary.
 async fn get_quality(
-    _State(_state): State<Arc<AppState>>,
-    _Query(_params): Query<HashMap<String, String>>,
+    State(_state): State<Arc<AppState>>,
+    Query(_params): Query<HashMap<String, String>>,
 ) -> Json<Value> {
     Json(json!({
         "banner": {
@@ -271,7 +274,11 @@ async fn post_execute(
             outcome: "skipped".to_string(),
             error: Some("execution disabled: --execute not passed".to_string()),
         };
-        *state.last_exec.write().expect("last_exec lock") = Some(result.clone());
+        *state
+            .last_exec
+            .write()
+            .await
+            .expect("last_exec lock") = Some(result.clone());
         return Json(json!(result));
     };
 
@@ -279,6 +286,7 @@ async fn post_execute(
     let Some(opportunity) = state
         .recent_opportunities
         .read()
+        .await
         .expect("recent_opportunities lock")
         .get(&opportunity_id)
         .cloned()
@@ -294,7 +302,11 @@ async fn post_execute(
             outcome: "skipped".to_string(),
             error: Some(format!("opportunity not found: {opportunity_id}")),
         };
-        *state.last_exec.write().expect("last_exec lock") = Some(result.clone());
+        *state
+            .last_exec
+            .write()
+            .await
+            .expect("last_exec lock") = Some(result.clone());
         return Json(json!(result));
     };
 
@@ -303,19 +315,19 @@ async fn post_execute(
         Ok(outcome) => {
             let (tx_hash, success, gas_spent, bounty, net_profit, outcome_str) =
                 match &outcome {
-                    mempool_scanner::exec::ExecOutcome::Confirmed { tx_hash, block: _ } => {
+                    ExecOutcome::Confirmed { tx_hash, block: _ } => {
                         (Some(format!("{tx_hash:#x}")), true, "0".to_string(), opportunity.gross_profit_wei.to_string(), opportunity.gross_profit_wei.to_string(), "confirmed".to_string())
                     }
-                    mempool_scanner::exec::ExecOutcome::Reverted { tx_hash, block: _ } => {
+                    ExecOutcome::Reverted { tx_hash, block: _ } => {
                         (Some(format!("{tx_hash:#x}")), false, "0".to_string(), "0".to_string(), "0".to_string(), "reverted".to_string())
                     }
-                    mempool_scanner::exec::ExecOutcome::Broadcast { tx_hash } => {
+                    ExecOutcome::Broadcast { tx_hash } => {
                         (Some(format!("{tx_hash:#x}")), true, "0".to_string(), opportunity.gross_profit_wei.to_string(), opportunity.gross_profit_wei.to_string(), "broadcast".to_string())
                     }
-                    mempool_scanner::exec::ExecOutcome::Simulated { profit } => {
+                    ExecOutcome::Simulated { profit } => {
                         (None, true, "0".to_string(), profit.to_string(), profit.to_string(), "simulated".to_string())
                     }
-                    mempool_scanner::exec::ExecOutcome::Skipped { reason } => {
+                    ExecOutcome::Skipped { reason } => {
                         (None, false, "0".to_string(), "0".to_string(), "0".to_string(), format!("skipped: {reason}"))
                     }
                 };
@@ -331,7 +343,11 @@ async fn post_execute(
                 outcome: outcome_str,
                 error: if success { None } else { Some(outcome_str.clone()) },
             };
-            *state.last_exec.write().expect("last_exec lock") = Some(result.clone());
+            *state
+                .last_exec
+                .write()
+                .await
+                .expect("last_exec lock") = Some(result.clone());
             Json(json!(result))
         }
         Err(e) => {
@@ -347,7 +363,11 @@ async fn post_execute(
                 outcome: "error".to_string(),
                 error: Some(e.to_string()),
             };
-            *state.last_exec.write().expect("last_exec lock") = Some(result.clone());
+            *state
+                .last_exec
+                .write()
+                .await
+                .expect("last_exec lock") = Some(result.clone());
             Json(json!(result))
         }
     }
@@ -398,7 +418,11 @@ async fn download_audit_logs(
 async fn get_last_exec(
     State(state): State<Arc<AppState>>,
 ) -> Json<Value> {
-    let guard = state.last_exec.read().expect("last_exec lock");
+    let guard = state
+        .last_exec
+        .read()
+        .await
+        .expect("last_exec lock");
     match guard.as_ref() {
         Some(r) => Json(json!(r)),
         None => Json(json!({
