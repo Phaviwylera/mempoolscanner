@@ -6,16 +6,16 @@
 //! shared `recent_opportunities` map so the API server can surface them.
 
 use crate::exec::LiquidationOpportunity;
-use alloy::primitives::{address, Address, U256};
+use alloy::network::TransactionBuilder;
+use alloy::primitives::{address, Address, Bytes, U256};
 use alloy::providers::{Provider, ProviderBuilder, RootProvider};
-use alloy::sol_types::SolValue;
-use alloy::transports::http::{Client, Http};
-use alloy::transports::layers::RetryMiddleware;
+use alloy::rpc::types::TransactionRequest;
+use alloy::sol_types::SolCall;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 // Aave V3 Ethereum Mainnet Pool address.
 pub const AAVE_V3_POOL: Address = address!("87870bca3f3fd6335c3f4ce8392d69350b4fa4e2");
@@ -30,22 +30,18 @@ pub const LIQUIDATION_BONUS_BPS: u64 = 500;
 pub const FLASH_LIQ_GAS_UNITS: u64 = 380_000;
 
 // Type alias for the HTTP provider used throughout the keeper.
-type HttpProvider = RootProvider<Http<RetryMiddleware<Client>>>;
+type HttpProvider = RootProvider<alloy::transports::http::Http<alloy::transports::http::Client>>;
 
-mod aave_pool {
-    alloy::sol!(
-        interface IPool {
-            function getUserAccountData(address user) external view returns (
-                uint256 totalCollateralBase,
-                uint256 totalDebtBase,
-                uint256 availableBorrowsBase,
-                uint256 currentLiquidationThreshold,
-                uint256 ltv,
-                uint256 healthFactor
-            );
-        }
+alloy::sol!(
+    function getUserAccountData(address user) returns (
+        uint256 totalCollateralBase,
+        uint256 totalDebtBase,
+        uint256 availableBorrowsBase,
+        uint256 currentLiquidationThreshold,
+        uint256 ltv,
+        uint256 healthFactor
     );
-}
+);
 
 /// Result of a borrower health check.
 #[derive(Clone, Debug)]
@@ -66,7 +62,6 @@ pub struct BorrowerHealth {
 pub struct Keeper {
     rpc_url: String,
     provider: HttpProvider,
-    pool: alloy::contract::Contract<HttpProvider>,
     recent_opportunities: Arc<RwLock<HashMap<String, LiquidationOpportunity>>>,
     tracked_borrowers: Arc<RwLock<Vec<Address>>>,
     operator_address: Option<Address>,
@@ -79,16 +74,10 @@ impl Keeper {
         recent_opportunities: Arc<RwLock<HashMap<String, LiquidationOpportunity>>>,
     ) -> Result<Self> {
         let provider: HttpProvider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
-        let pool = alloy::contract::Contract::new(
-            AAVE_V3_POOL,
-            aave_pool::IPool::SOL_INTERFACE,
-            provider.clone(),
-        );
 
         Ok(Self {
             rpc_url: rpc_url.to_string(),
             provider,
-            pool,
             recent_opportunities,
             tracked_borrowers: Arc::new(RwLock::new(Vec::new())),
             operator_address: None,
@@ -116,7 +105,6 @@ impl Keeper {
 
     /// Get all borrower health snapshots.
     pub async fn all_health(&self) -> Vec<BorrowerHealth> {
-        // Re-poll on demand for fresh data.
         match self.poll_borrowers().await {
             Ok(list) => list,
             Err(e) => {
@@ -183,21 +171,26 @@ impl Keeper {
         Ok(results)
     }
 
-    /// Call Aave V3 Pool.getUserAccountData for a borrower.
+    /// Call Aave V3 Pool.getUserAccountData for a borrower using raw calldata.
     async fn get_user_account_data(&self, user: Address) -> Result<UserAccountData> {
-        let result: (U256, U256, U256, U256, U256, U256) = self
-            .pool
-            .method("getUserAccountData", user)?
-            .call()
-            .await?;
+        let call = getUserAccountDataCall { user };
+        let calldata = Bytes::from(call.abi_encode());
+
+        let tx = TransactionRequest::default()
+            .to(AAVE_V3_POOL)
+            .input(calldata);
+
+        let result: Bytes = self.provider.call(tx).await?;
+        let decoded: (U256, U256, U256, U256, U256, U256) =
+            alloy::sol_types::SolValue::abi_decode(&result, false)?;
 
         Ok(UserAccountData {
-            total_collateral_base: result.0,
-            total_debt_base: result.1,
-            available_borrows_base: result.2,
-            current_liquidation_threshold: result.3,
-            ltv: result.4,
-            health_factor: result.5,
+            total_collateral_base: decoded.0,
+            total_debt_base: decoded.1,
+            available_borrows_base: decoded.2,
+            current_liquidation_threshold: decoded.3,
+            ltv: decoded.4,
+            health_factor: decoded.5,
         })
     }
 
@@ -215,7 +208,7 @@ impl Keeper {
             value: U256::ZERO,
             gas_limit: FLASH_LIQ_GAS_UNITS,
             nonce: 0,
-            calldata: alloy::primitives::Bytes::new(),
+            calldata: Bytes::new(),
             gross_profit_wei: net_profit,
             borrower: Some(borrower),
             collateral: None,
