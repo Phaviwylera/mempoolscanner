@@ -331,8 +331,8 @@ async fn post_execute(
                 gas_spent_wei: gas_spent,
                 bounty_wei: bounty,
                 net_profit_wei: net_profit,
-                outcome: outcome_str,
-                error: if success { None } else { Some(outcome_str.clone()) },
+                outcome: outcome_str.clone(),
+                error: if success { None } else { Some(outcome_str) },
             };
             *state.last_exec.write().await = Some(result.clone());
             Json(json!(result))
