@@ -58,7 +58,6 @@ pub struct BorrowerHealth {
 /// Aave V3 keeper state.
 #[derive(Clone)]
 pub struct Keeper {
-    rpc_url: String,
     provider: DynProvider,
     recent_opportunities: Arc<RwLock<HashMap<String, LiquidationOpportunity>>>,
     tracked_borrowers: Arc<RwLock<Vec<Address>>>,
@@ -76,7 +75,6 @@ impl Keeper {
             .erased();
 
         Ok(Self {
-            rpc_url: rpc_url.to_string(),
             provider,
             recent_opportunities,
             tracked_borrowers: Arc::new(RwLock::new(Vec::new())),
@@ -231,13 +229,11 @@ impl Keeper {
         // Slippage estimate: 0.5% of collateral value (conservative).
         let slippage = collateral_seized_gross * U256::from(5) / U256::from(1000);
 
-        let net = collateral_seized_gross
+        collateral_seized_gross
             .saturating_sub(debt_to_cover)
             .saturating_sub(premium)
             .saturating_sub(gas_cost)
-            .saturating_sub(slippage);
-
-        net
+            .saturating_sub(slippage)
     }
 }
 

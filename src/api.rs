@@ -98,7 +98,7 @@ impl AppState {
         guard.insert(id, opp);
         // Keep only the most recent 200 opportunities
         if guard.len() > 200 {
-            let oldest: Vec<String> = guard.keys().cloned().take(guard.len() - 200).collect();
+            let oldest: Vec<String> = guard.keys().take(guard.len() - 200).cloned().collect();
             for k in oldest {
                 guard.remove(&k);
             }
