@@ -28,10 +28,8 @@ pub fn load_signer_from_env() -> Result<LocalSigner> {
             if key_bytes.len() != 32 {
                 return Err(anyhow!("EXEC_PRIVATE_KEY must be 32 bytes"));
             }
-            let array: [u8; 32] = key_bytes
-                .as_ref()
-                .try_into()
-                .map_err(|_| anyhow!("EXEC_PRIVATE_KEY must be 32 bytes"))?;
+            let mut array = [0u8; 32];
+            array.copy_from_slice(key_bytes.as_ref());
             let signer = LocalSigner::from_slice(&array)
                 .map_err(|e| anyhow!("invalid EXEC_PRIVATE_KEY: {e}"))?;
             return Ok(signer);
@@ -39,10 +37,9 @@ pub fn load_signer_from_env() -> Result<LocalSigner> {
     }
 
     let keystore_path = env::var("EXEC_KEYSTORE_PATH")
-        .ok_or_else(|| anyhow!("EXEC_PRIVATE_KEY and EXEC_KEYSTORE_PATH are both unset"))?;
-    let password = env::var("EXEC_KEYSTORE_PASSWORD").ok_or_else(|| {
-        anyhow!("EXEC_KEYSTORE_PASSWORD is required when EXEC_KEYSTORE_PATH is set")
-    })?;
+        .map_err(|_| anyhow!("EXEC_PRIVATE_KEY and EXEC_KEYSTORE_PATH are both unset"))?;
+    let password = env::var("EXEC_KEYSTORE_PASSWORD")
+        .map_err(|_| anyhow!("EXEC_KEYSTORE_PASSWORD is required when EXEC_KEYSTORE_PATH is set"))?;
 
     let signer = LocalSigner::decrypt_keystore(&keystore_path, password.into_bytes())
         .map_err(|e| anyhow!("failed to decrypt keystore at {keystore_path}: {e}"))?;
