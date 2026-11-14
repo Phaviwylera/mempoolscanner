@@ -21,6 +21,7 @@ alloy = { version = "2.5", default-features = false, features = [
     "sol-types",
     "json",
     "rpc-types",
+    "contract",
     "providers",
     "provider-http",
     "provider-ws-ring",
