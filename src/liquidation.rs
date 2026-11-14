@@ -360,7 +360,7 @@ pub fn compute_flash_liquidation_plan(
     };
 
     // Projected bounty at the exact crossing point where HF hits 0.99.
-    let trigger_collateral_usd = if safe_hf >= 1.0 && safe_hf < 50.0 {
+    let trigger_collateral_usd = if (1.0..50.0).contains(&safe_hf) {
         collateral_usd * (0.99 / safe_hf)
     } else {
         collateral_usd
@@ -919,7 +919,7 @@ pub async fn liquidation_watcher_loop(
             )
             .await;
             let mut recent: Vec<ObservedLiquidationEvent> = liq_events.iter().cloned().collect();
-            recent.sort_by(|a, b| b.block_number.cmp(&a.block_number));
+            recent.sort_by_key(|a| std::cmp::Reverse(a.block_number));
 
             let snapshot = LiquidationSnapshot {
                 protocol: "Aave V3 · Ethereum Mainnet".to_string(),
@@ -995,7 +995,7 @@ pub async fn liquidation_watcher_loop(
         .await;
 
         let mut recent: Vec<ObservedLiquidationEvent> = liq_events.iter().cloned().collect();
-        recent.sort_by(|a, b| b.block_number.cmp(&a.block_number));
+        recent.sort_by_key(|a| std::cmp::Reverse(a.block_number));
 
         let snapshot = LiquidationSnapshot {
             protocol: "Aave V3 · Ethereum Mainnet".to_string(),

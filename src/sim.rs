@@ -444,6 +444,7 @@ fn parse_transfers_and_gains(
     (out, actor_wei_equiv, actor_spent_wei, actor_count)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_revm_call(
     backend: Arc<dyn StateBackend>,
     snap: &BlockSnapshot,

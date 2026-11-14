@@ -251,12 +251,12 @@ async fn sign_transaction(
     // The signer is left unbound so `sign_transaction_with_chain_id` uses the
     // transaction's own chain ID (set below) for EIP-155 replay protection.
     let mut tx = TxEip1559 {
-        chain_id: chain_id.into(),
+        chain_id,
         nonce: opportunity.nonce,
         gas_limit: opportunity.gas_limit,
         to: TxKind::Call(opportunity.to),
         value: opportunity.value,
-        input: opportunity.calldata.clone().into(),
+        input: opportunity.calldata.clone(),
         max_fee_per_gas: 0,
         max_priority_fee_per_gas: 0,
         access_list: Default::default(),
