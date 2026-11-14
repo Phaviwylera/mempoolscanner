@@ -11,7 +11,6 @@ use alloy::network::TransactionBuilder;
 use alloy::primitives::{address, Address, Bytes, TxKind, B256, U256};
 use alloy::providers::{DynProvider, Provider};
 use alloy::rpc::types::{Filter, Log as RpcLog, TransactionRequest};
-use alloy::sol;
 use alloy::sol_types::{SolCall, SolEvent};
 use chrono::{SecondsFormat, Utc};
 use futures_util::stream::{self, StreamExt};
@@ -31,7 +30,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Aave V3 Ethereum Mainnet Pool proxy (`IPool`).
 pub const AAVE_V3_POOL: Address = address!("87870bca3f3fd6335c3f4ce8392d69350b4fa4e2");
