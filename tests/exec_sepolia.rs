@@ -7,7 +7,7 @@
 use mempool_scanner::exec::{simulate_with_backend, ExecOutcome, LiquidationOpportunity};
 use mempool_scanner::state::InMemoryStateBackend;
 use alloy::primitives::{address, Bytes, ChainId, U256};
-use alloy::providers::ProviderBuilder;
+use alloy::providers::{Provider, ProviderBuilder};
 use std::sync::Arc;
 
 #[tokio::test]
@@ -28,10 +28,10 @@ async fn sepolia_gate_rejects_unprofitable_and_never_mainnet() {
     // Gate: a deliberately unprofitable opportunity (zero gross) must be
     // rejected by the simulation gate. No signer and no network needed here
     // because we simulate against the in-memory backend directly.
-    let backend: Arc<dyn mempool_scanner::state::StateBackend> =
-        Arc::new(InMemoryStateBackend::default());
+    let backend = InMemoryStateBackend::default();
     let target = address!("aaaa000000000000000000000000000000000001");
     backend.insert_account(target, U256::ZERO, Some(vec![0x00])); // STOP: call succeeds
+    let backend: Arc<dyn mempool_scanner::state::StateBackend> = Arc::new(backend);
 
     let opportunity = LiquidationOpportunity {
         id: "0xtest-sepolia".to_string(),

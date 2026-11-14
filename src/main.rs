@@ -71,6 +71,7 @@ async fn main() -> Result<()> {
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(1);
         let rpc_url = env::var("EXEC_RPC_URL")
+            .ok()
             .map(|v| url::Url::parse(&v))
             .transpose()
             .map_err(|e| anyhow::anyhow!("invalid EXEC_RPC_URL: {e}"))?
