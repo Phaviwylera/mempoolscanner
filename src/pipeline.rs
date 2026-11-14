@@ -23,7 +23,7 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, Mutex, Semaphore};
 use tracing::{debug, error, info, warn};
@@ -320,7 +320,11 @@ fn now_iso() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-pub async fn run_scanner(settings: Settings, exec_config: Option<Arc<ExecConfig>>) -> Result<()> {
+pub async fn run_scanner(
+    settings: Settings,
+    exec_config: Option<Arc<ExecConfig>>,
+    recent_opportunities: Arc<RwLock<HashMap<String, LiquidationOpportunity>>>,
+) -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let state_provider = connect_http_with_retry(&settings.state_rpc).await?;
@@ -743,6 +747,7 @@ async fn ingestion_supervisor(
                                 &sim_params,
                                 &record_tx,
                                 exec_config.clone(),
+                                recent_opportunities.clone(),
                             );
                             loop {
                                 tokio::select! {
@@ -759,10 +764,11 @@ async fn ingestion_supervisor(
                                             &sim_sem,
                                             &monitor,
                                             &backend,
-                                            &sim_params,
-                                            &record_tx,
-                                            exec_config.clone(),
-                                        );
+                                &sim_params,
+                                &record_tx,
+                                exec_config.clone(),
+                                recent_opportunities.clone(),
+                            );
                                     }
                                     _ = shutdown_rx.changed() => return Ok(()),
                                 }
@@ -883,6 +889,7 @@ fn dispatch_hash_tx(
                 &sim_params,
                 &record_tx,
                 exec_config.clone(),
+                recent_opportunities.clone(),
             );
         }
     });
@@ -899,6 +906,7 @@ fn dispatch_full_tx(
     sim_params: &Arc<SimulationParams>,
     record_tx: &mpsc::Sender<HitRecord>,
     exec_config: Option<Arc<ExecConfig>>,
+    recent_opportunities: &Arc<RwLock<HashMap<String, LiquidationOpportunity>>>,
 ) {
     // Ignore transactions that are already mined/closed on-chain.
     if TransactionResponse::block_number(&tx).is_some() {
@@ -994,10 +1002,13 @@ fn dispatch_full_tx(
             let cfg = exec_config.expect("exec_config present when should_exec");
             let decoded = decoded_clone;
             let observed = observed_clone;
+            let recent_opportunities = recent_opportunities.clone();
             tokio::spawn(async move {
                 let mut opportunity =
                     LiquidationOpportunity::from_hit_record(&record, &decoded, &observed);
                 opportunity.chain_id = cfg.chain_id;
+                // Store the opportunity so /api/execute can look it up later
+                recent_opportunities.write().expect("recent_opportunities lock").insert(opportunity.id.clone(), opportunity.clone());
                 match execute_liquidation(&cfg, &opportunity).await {
                     Ok(outcome) => {
                         info!("execution {} -> {:?}", opportunity.id, outcome)
