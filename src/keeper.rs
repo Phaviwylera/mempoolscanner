@@ -7,7 +7,7 @@
 
 use crate::exec::LiquidationOpportunity;
 use alloy::primitives::{address, Address, Bytes, U256};
-use alloy::providers::{DynProvider, ProviderBuilder};
+use alloy::providers::{DynProvider, Provider, ProviderBuilder};
 use alloy::rpc::types::TransactionRequest;
 use alloy::sol_types::SolCall;
 use anyhow::Result;
@@ -172,26 +172,18 @@ impl Keeper {
         Ok(results)
     }
 
-    /// Call Aave V3 Pool.getUserAccountData for a borrower using raw calldata.
+    /// Call Aave V3 Pool.getUserAccountData for a borrower.
     async fn get_user_account_data(&self, user: Address) -> Result<UserAccountData> {
-        let call = getUserAccountDataCall { user };
-        let calldata = Bytes::from(call.abi_encode());
-
-        let tx = TransactionRequest::default()
-            .to(AAVE_V3_POOL)
-            .input(calldata.into());
-
-        let result: Bytes = self.provider.call(&tx).await?;
-        let decoded: (U256, U256, U256, U256, U256, U256) =
-            alloy::sol_types::SolValue::abi_decode(&result)?;
+        let pool = IPool::new(AAVE_V3_POOL, &self.provider);
+        let data = pool.getUserAccountData(user).call().await?;
 
         Ok(UserAccountData {
-            total_collateral_base: decoded.0,
-            total_debt_base: decoded.1,
-            available_borrows_base: decoded.2,
-            current_liquidation_threshold: decoded.3,
-            ltv: decoded.4,
-            health_factor: decoded.5,
+            total_collateral_base: data.totalCollateralBase,
+            total_debt_base: data.totalDebtBase,
+            available_borrows_base: data.availableBorrowsBase,
+            current_liquidation_threshold: data.currentLiquidationThreshold,
+            ltv: data.ltv,
+            health_factor: data.healthFactor,
         })
     }
 
