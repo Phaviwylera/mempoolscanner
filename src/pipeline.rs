@@ -420,7 +420,8 @@ pub async fn run_scanner(
         record_tx.clone(),
         settings,
         shutdown_rx,
-        exec_config,
+        exec_config.clone(),
+        recent_opportunities.clone(),
     );
 
     tokio::select! {
@@ -683,6 +684,7 @@ async fn ingestion_supervisor(
     settings: Settings,
     mut shutdown_rx: watch::Receiver<bool>,
     exec_config: Option<Arc<ExecConfig>>,
+    recent_opportunities: Arc<RwLock<HashMap<String, LiquidationOpportunity>>>,
 ) -> Result<()> {
     let sim_sem = Arc::new(Semaphore::new(settings.worker_concurrency));
     let fetch_sem = Arc::new(Semaphore::new((settings.worker_concurrency * 2).clamp(8, 24)));
@@ -906,7 +908,7 @@ fn dispatch_full_tx(
     sim_params: &Arc<SimulationParams>,
     record_tx: &mpsc::Sender<HitRecord>,
     exec_config: Option<Arc<ExecConfig>>,
-    recent_opportunities: &Arc<RwLock<HashMap<String, LiquidationOpportunity>>>,
+    recent_opportunities: Arc<RwLock<HashMap<String, LiquidationOpportunity>>>,
 ) {
     // Ignore transactions that are already mined/closed on-chain.
     if TransactionResponse::block_number(&tx).is_some() {
