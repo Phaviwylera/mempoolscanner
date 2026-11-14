@@ -14,7 +14,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// Price update received from Pyth.
 #[derive(Clone, Debug, Deserialize)]

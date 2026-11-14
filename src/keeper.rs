@@ -6,9 +6,8 @@
 //! shared `recent_opportunities` map so the API server can surface them.
 
 use crate::exec::LiquidationOpportunity;
-use alloy::network::TransactionBuilder;
 use alloy::primitives::{address, Address, Bytes, U256};
-use alloy::providers::{Provider, ProviderBuilder, RootProvider};
+use alloy::providers::{DynProvider, ProviderBuilder};
 use alloy::rpc::types::TransactionRequest;
 use alloy::sol_types::SolCall;
 use anyhow::Result;
@@ -29,19 +28,19 @@ pub const LIQUIDATION_BONUS_BPS: u64 = 500;
 // Estimated gas units for atomic flash loan + liquidation + swap.
 pub const FLASH_LIQ_GAS_UNITS: u64 = 380_000;
 
-// Type alias for the HTTP provider used throughout the keeper.
-type HttpProvider = RootProvider<alloy::transports::http::Http<alloy::transports::http::Client>>;
-
-alloy::sol!(
-    function getUserAccountData(address user) returns (
-        uint256 totalCollateralBase,
-        uint256 totalDebtBase,
-        uint256 availableBorrowsBase,
-        uint256 currentLiquidationThreshold,
-        uint256 ltv,
-        uint256 healthFactor
-    );
-);
+alloy::sol! {
+    #[derive(Debug, PartialEq)]
+    interface IPool {
+        function getUserAccountData(address user) external view returns (
+            uint256 totalCollateralBase,
+            uint256 totalDebtBase,
+            uint256 availableBorrowsBase,
+            uint256 currentLiquidationThreshold,
+            uint256 ltv,
+            uint256 healthFactor
+        );
+    }
+}
 
 /// Result of a borrower health check.
 #[derive(Clone, Debug)]
@@ -61,7 +60,7 @@ pub struct BorrowerHealth {
 #[derive(Clone)]
 pub struct Keeper {
     rpc_url: String,
-    provider: HttpProvider,
+    provider: DynProvider,
     recent_opportunities: Arc<RwLock<HashMap<String, LiquidationOpportunity>>>,
     tracked_borrowers: Arc<RwLock<Vec<Address>>>,
     operator_address: Option<Address>,
@@ -73,7 +72,9 @@ impl Keeper {
         rpc_url: &str,
         recent_opportunities: Arc<RwLock<HashMap<String, LiquidationOpportunity>>>,
     ) -> Result<Self> {
-        let provider: HttpProvider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+        let provider: DynProvider = ProviderBuilder::new()
+            .connect_http(rpc_url.parse()?)
+            .erased();
 
         Ok(Self {
             rpc_url: rpc_url.to_string(),
@@ -178,11 +179,11 @@ impl Keeper {
 
         let tx = TransactionRequest::default()
             .to(AAVE_V3_POOL)
-            .input(calldata);
+            .input(calldata.into());
 
-        let result: Bytes = self.provider.call(tx).await?;
+        let result: Bytes = self.provider.call(&tx).await?;
         let decoded: (U256, U256, U256, U256, U256, U256) =
-            alloy::sol_types::SolValue::abi_decode(&result, false)?;
+            alloy::sol_types::SolValue::abi_decode(&result)?;
 
         Ok(UserAccountData {
             total_collateral_base: decoded.0,
