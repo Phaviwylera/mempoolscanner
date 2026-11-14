@@ -89,15 +89,16 @@ pub async fn broadcast_and_confirm(
 /// Returns the bundle hash on success, or `None` when no private relay is
 /// configured / all attempts failed.
 async fn send_bundle_private(
-    provider: &DynProvider,
+    _provider: &DynProvider,
     signer: &LocalSigner,
     encoded_tx: &[u8],
     target_block: u64,
     flashbots_relay: Option<&Url>,
     builder_relays: &[Url],
 ) -> Result<Option<B256>> {
-    let bundle = || EthSendBundle {
-        txs: vec![Bytes::from(encoded_tx)],
+    let encoded_tx = encoded_tx.to_vec();
+    let bundle = move || EthSendBundle {
+        txs: vec![Bytes::from(encoded_tx.clone())],
         block_number: target_block,
         ..Default::default()
     };
