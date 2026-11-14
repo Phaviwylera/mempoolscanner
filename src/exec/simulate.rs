@@ -146,13 +146,14 @@ async fn simulate_gas_used(
 mod tests {
     use super::*;
     use crate::state::InMemoryStateBackend;
-    use alloy::primitives::address;
+    use alloy::primitives::{address, Address, Bytes};
 
     fn backend_with_succeeding_contract() -> (Arc<dyn StateBackend>, Address) {
-        let backend: Arc<dyn StateBackend> = Arc::new(InMemoryStateBackend::default());
+        let backend = InMemoryStateBackend::default();
         let target = address!("aaaa000000000000000000000000000000000001");
         // STOP bytecode: call succeeds immediately.
         backend.insert_account(target, U256::ZERO, Some(vec![0x00]));
+        let backend: Arc<dyn StateBackend> = Arc::new(backend);
         (backend, target)
     }
 

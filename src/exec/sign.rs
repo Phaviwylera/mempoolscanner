@@ -48,7 +48,6 @@ pub fn load_signer_from_env() -> Result<LocalSigner> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     #[ignore] // requires EXEC_PRIVATE_KEY to be set; never run in CI

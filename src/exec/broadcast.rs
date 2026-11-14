@@ -18,6 +18,7 @@ use url::Url;
 /// `with_auth(signer)`.
 /// Secondary path: fan-out to each configured builder relay.
 /// Returns `Ok(None)` when no private relay is available.
+#[allow(clippy::too_many_arguments)]
 pub async fn broadcast_and_confirm(
     rpc_url: &str,
     signer: &LocalSigner,
@@ -124,10 +125,8 @@ async fn send_bundle_private(
             continue;
         };
         let fb = fb.erased();
-        if let Ok(res) = fb.send_bundle(bundle()).await {
-            if let Some(h) = res {
-                return Ok(Some(h.bundle_hash));
-            }
+        if let Ok(Some(h)) = fb.send_bundle(bundle()).await {
+            return Ok(Some(h.bundle_hash));
         }
     }
 
