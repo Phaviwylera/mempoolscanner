@@ -15,6 +15,4 @@ severity = "error"
 
 # Allow-list the crates used by the opt-in execution module.
 [[lint]]
-crate = "alloy"
-crate = "revm"
-crate = "zeroize"
+crate = ["alloy", "revm", "zeroize"]
