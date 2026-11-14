@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {forge-std/Script.sol};
-import {forge-std/console.sol};
+import {Script} from "forge-std/Script.sol";
+import {console2} from "forge-std/console2.sol";
 import {AaveV3Liquidator} from "../src/AaveV3Liquidator.sol";
 
 // Mainnet:
@@ -51,10 +51,10 @@ contract DeployLiquidator is Script {
         deployed = new AaveV3Liquidator(provider, router, operator);
         vm.stopBroadcast();
 
-        console.log("AaveV3Liquidator:", address(deployed));
-        console.log("chainId:       ", chainId);
-        console.log("provider:      ", provider);
-        console.log("swapRouter02:  ", router);
-        console.log("operator:      ", operator);
+        console2.log("AaveV3Liquidator:", address(deployed));
+        console2.log("chainId:       ", chainId);
+        console2.log("provider:      ", provider);
+        console2.log("swapRouter02:  ", router);
+        console2.log("operator:      ", operator);
     }
 }
