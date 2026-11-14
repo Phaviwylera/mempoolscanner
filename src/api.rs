@@ -94,8 +94,7 @@ impl AppState {
         let mut guard = self
             .recent_opportunities
             .write()
-            .await
-            .expect("recent_opportunities lock");
+            .await;
         guard.insert(id, opp);
         // Keep only the most recent 200 opportunities
         if guard.len() > 200 {
@@ -274,11 +273,7 @@ async fn post_execute(
             outcome: "skipped".to_string(),
             error: Some("execution disabled: --execute not passed".to_string()),
         };
-        *state
-            .last_exec
-            .write()
-            .await
-            .expect("last_exec lock") = Some(result.clone());
+        *state.last_exec.write().await = Some(result.clone());
         return Json(json!(result));
     };
 
@@ -287,7 +282,6 @@ async fn post_execute(
         .recent_opportunities
         .read()
         .await
-        .expect("recent_opportunities lock")
         .get(&opportunity_id)
         .cloned()
     else {
@@ -302,11 +296,7 @@ async fn post_execute(
             outcome: "skipped".to_string(),
             error: Some(format!("opportunity not found: {opportunity_id}")),
         };
-        *state
-            .last_exec
-            .write()
-            .await
-            .expect("last_exec lock") = Some(result.clone());
+        *state.last_exec.write().await = Some(result.clone());
         return Json(json!(result));
     };
 
@@ -343,11 +333,7 @@ async fn post_execute(
                 outcome: outcome_str,
                 error: if success { None } else { Some(outcome_str.clone()) },
             };
-            *state
-                .last_exec
-                .write()
-                .await
-                .expect("last_exec lock") = Some(result.clone());
+            *state.last_exec.write().await = Some(result.clone());
             Json(json!(result))
         }
         Err(e) => {
@@ -363,11 +349,7 @@ async fn post_execute(
                 outcome: "error".to_string(),
                 error: Some(e.to_string()),
             };
-            *state
-                .last_exec
-                .write()
-                .await
-                .expect("last_exec lock") = Some(result.clone());
+            *state.last_exec.write().await = Some(result.clone());
             Json(json!(result))
         }
     }
@@ -418,11 +400,7 @@ async fn download_audit_logs(
 async fn get_last_exec(
     State(state): State<Arc<AppState>>,
 ) -> Json<Value> {
-    let guard = state
-        .last_exec
-        .read()
-        .await
-        .expect("last_exec lock");
+    let guard = state.last_exec.read().await;
     match guard.as_ref() {
         Some(r) => Json(json!(r)),
         None => Json(json!({
