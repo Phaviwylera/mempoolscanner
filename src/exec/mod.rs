@@ -24,7 +24,7 @@ use alloy::network::TxSigner;
 use alloy::primitives::{Address, B256, Bytes, TxKind, U256};
 use alloy::signers::local::PrivateKeySigner as LocalSigner;
 use anyhow::{anyhow, Result};
-use bytes::BufMut;
+use bytes::{BufMut, BytesMut};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use url::Url;
@@ -268,9 +268,9 @@ async fn sign_transaction(
         .map_err(|e| anyhow!("sign tx: {e}"))?;
     let signed = tx.into_signed(sig);
 
-    let mut buf = Vec::new();
+    let mut buf = BytesMut::new();
     signed.eip2718_encode(&mut buf);
-    Ok(buf)
+    Ok(buf.to_vec())
 }
 
 /// Append an audit record to `exec_audit.jsonl` next to the scanner log.

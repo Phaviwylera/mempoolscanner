@@ -320,7 +320,7 @@ fn now_iso() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-pub async fn run_scanner(settings: Settings, exec_config: Option<ExecConfig>) -> Result<()> {
+pub async fn run_scanner(settings: Settings, exec_config: Option<Arc<ExecConfig>>) -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let state_provider = connect_http_with_retry(&settings.state_rpc).await?;
@@ -808,6 +808,7 @@ async fn ingestion_supervisor(
                                 &backend,
                                 &sim_params,
                                 &record_tx,
+                                exec_config.clone(),
                             );
                         }
                         _ = shutdown_rx.changed() => return Ok(()),
@@ -837,6 +838,7 @@ fn dispatch_hash_tx(
     backend: &Arc<dyn StateBackend>,
     sim_params: &Arc<SimulationParams>,
     record_tx: &mpsc::Sender<HitRecord>,
+    exec_config: Option<Arc<ExecConfig>>,
 ) {
     let Ok(fetch_permit) = fetch_sem.clone().try_acquire_owned() else {
         return;
@@ -846,6 +848,7 @@ fn dispatch_hash_tx(
     let backend = backend.clone();
     let sim_params = sim_params.clone();
     let record_tx = record_tx.clone();
+    let exec_config = exec_config.clone();
 
     tokio::spawn(async move {
         let t0 = Instant::now();
