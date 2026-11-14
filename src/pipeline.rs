@@ -690,7 +690,10 @@ async fn ingestion_supervisor(
     // Simulations are the RPC-heavy stage, so they get their own small budget
     // (SIM_CONCURRENCY, default 2) rather than sharing worker_concurrency.
     let sim_sem = Arc::new(Semaphore::new(settings.sim_concurrency));
-    let fetch_sem = Arc::new(Semaphore::new((settings.worker_concurrency * 2).clamp(8, 24)));
+    // FETCH_CONCURRENCY, default 8 (was worker_concurrency*2 clamped to 8..24,
+    // i.e. 16). Halving it halves the eth_getTransactionByHash pressure that
+    // feeds the simulation stage.
+    let fetch_sem = Arc::new(Semaphore::new(settings.fetch_concurrency));
     let sim_params = Arc::new(SimulationParams {
         max_lag: settings.max_lag,
         depth: settings.depth,

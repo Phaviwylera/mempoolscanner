@@ -21,6 +21,13 @@ pub struct Settings {
     /// eth_getStorageAt / eth_getBalance calls, so 8 at once is what
     /// triggers provider rate limits (-32005).
     pub sim_concurrency: usize,
+    /// Concurrent tx-body fetches (`eth_getTransactionByHash`).
+    ///
+    /// This permit is taken with `try_acquire_owned`, so when it is exhausted
+    /// the transaction is DROPPED rather than queued. Lowering it cuts RPC
+    /// pressure but observes fewer mempool transactions -- that is deliberate
+    /// backpressure for a read-only observer, not a silent failure.
+    pub fetch_concurrency: usize,
     pub sim_timeout_ms: u64,
 }
 
@@ -75,7 +82,11 @@ impl Settings {
             poll_seconds: read_f64("FORK_POLL_SECONDS", 3.0, 0.5),
             worker_concurrency: read_u64("WORKER_CONCURRENCY", 8, 1) as usize,
             sim_concurrency: read_u64("SIM_CONCURRENCY", 2, 1) as usize,
-            sim_timeout_ms: read_u64("SIM_TIMEOUT_MS", 6_000, 500),
+            fetch_concurrency: read_u64("FETCH_CONCURRENCY", 8, 1) as usize,
+            // 10s, up from 6s: with_rpc_retry can add up to 3.5s of backoff
+            // (500ms + 1s + 2s) to a single state read under rate limiting, so a
+            // 6s budget was being spent on backoff rather than on execution.
+            sim_timeout_ms: read_u64("SIM_TIMEOUT_MS", 10_000, 500),
         })
     }
 }
