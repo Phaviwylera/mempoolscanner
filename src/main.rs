@@ -5,7 +5,7 @@
 //! opportunities the operator detects. Without `--execute` the binary behaves
 //! exactly as before: no keys, no signing, no broadcasting.
 //!
-//! An HTTP API server is also started on port 3000 (or `API_PORT` env var)
+//! An HTTP API server is also started on port 3000 (or `API_ADDR` env var)
 //! to serve the execution UI (`web/`) and JSON endpoints for hits,
 //! liquidations, and execution control.
 
@@ -16,14 +16,15 @@ use mempool_scanner::api::{start_api_server, AppState};
 use mempool_scanner::config::Settings;
 use mempool_scanner::exec::{load_signer_from_env, ExecConfig};
 use mempool_scanner::pipeline::run_scanner;
+use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
-const VERSION: &str = env!(\"CARGO_PKG_VERSION\");
-const GIT_SHA: &str = env!(\"GIT_COMMIT_SHA\");
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const GIT_SHA: &str = env!("GIT_COMMIT_SHA");
 
 fn flag(args: &[String], name: &str) -> bool {
     args.iter().any(|a| a == name)
@@ -34,32 +35,34 @@ async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let args: Vec<String> = env::args().skip(1).collect();
-    if args.iter().any(|a| a == \"--version\" || a == \"-V\") {
-        println!(\"mempool-scanner {VERSION} ({GIT_SHA})\");
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("mempool-scanner {VERSION} ({GIT_SHA})");
         return Ok(());
     }
-    if args.iter().any(|a| a == \"--dump-selectors\") {
-        println!(\"{}\", serde_json::to_string_pretty(&*REGISTRY)?);
+    if args.iter().any(|a| a == "--dump-selectors") {
+        println!("{}", serde_json::to_string_pretty(&*REGISTRY)?);
         return Ok(());
     }
 
-    let execute = flag(&args, \"--execute\");
-    let dry_run = flag(&args, \"--dry-run\");
+    let execute = flag(&args, "--execute");
+    let dry_run = flag(&args, "--dry-run");
 
     // Safety rail: `--execute` requires operator key material to be present in
     // the environment before we touch the network. Exit with a clear error
     // otherwise.
     if execute {
-        let has_key = env::var(\"EXEC_PRIVATE_KEY\").is_ok() && !env::var(\"EXEC_PRIVATE_KEY\").unwrap().trim().is_empty();
-        let has_keystore = env::var(\"EXEC_KEYSTORE_PATH\").is_ok() && !env::var(\"EXEC_KEYSTORE_PATH\").unwrap().trim().is_empty();
+        let has_key = env::var("EXEC_PRIVATE_KEY").is_ok()
+            && !env::var("EXEC_PRIVATE_KEY").unwrap().trim().is_empty();
+        let has_keystore = env::var("EXEC_KEYSTORE_PATH").is_ok()
+            && !env::var("EXEC_KEYSTORE_PATH").unwrap().trim().is_empty();
         if !has_key && !has_keystore {
-            eprintln!(\"error: --execute requires EXEC_PRIVATE_KEY or EXEC_KEYSTORE_PATH (+ EXEC_KEYSTORE_PASSWORD) to be set\");
+            eprintln!("error: --execute requires EXEC_PRIVATE_KEY or EXEC_KEYSTORE_PATH (+ EXEC_KEYSTORE_PASSWORD) to be set");
             std::process::exit(2);
         }
     }
 
     let _ = dotenvy::dotenv();
-    let default_level = env::var(\"LOG_LEVEL\").unwrap_or_else(|_| \"info\".to_string());
+    let default_level = env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(default_level.to_lowercase()));
 
@@ -71,56 +74,61 @@ async fn main() -> Result<()> {
 
     let settings = Settings::from_env()?;
 
-    // --- Start HTTP API server for the execution UI ---
-    let api_state = AppState::new();
-    let api_addr: SocketAddr = env::var(\"API_ADDR\")
+    // --- Shared state between scanner pipeline and HTTP API server ---
+    let recent_opportunities: Arc<RwLock<HashMap<String, mempool_scanner::exec::LiquidationOpportunity>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+
+    let mut api_state = AppState::new();
+    api_state.recent_opportunities = recent_opportunities.clone();
+
+    let api_addr: SocketAddr = env::var("API_ADDR")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or_else(|| \"0.0.0.0:3000\".parse().expect(\"invalid API_ADDR\"));
+        .unwrap_or_else(|| "0.0.0.0:3000".parse().expect("invalid API_ADDR"));
 
     let api_state_clone = api_state.clone();
     tokio::spawn(async move {
         if let Err(e) = start_api_server(api_addr, api_state_clone).await {
-            error!(%e, \"HTTP API server stopped\");
+            error!(%e, "HTTP API server stopped");
         }
     });
 
     let exec_config = if execute {
         let signer = load_signer_from_env()?;
-        let chain_id: u64 = env::var(\"EXEC_CHAIN_ID\")
+        let chain_id: u64 = env::var("EXEC_CHAIN_ID")
             .ok()
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(1);
-        let rpc_url = env::var(\"EXEC_RPC_URL\")
+        let rpc_url = env::var("EXEC_RPC_URL")
             .ok()
             .map(|v| url::Url::parse(&v))
             .transpose()
-            .map_err(|e| anyhow::anyhow!(\"invalid EXEC_RPC_URL: {e}\"))?
-            .ok_or_else(|| anyhow::anyhow!(\"EXEC_RPC_URL is required when --execute is passed\"))?;
-        let flashbots_relay = env::var(\"FLASHBOTS_RELAY\")
+            .map_err(|e| anyhow::anyhow!("invalid EXEC_RPC_URL: {e}"))?
+            .ok_or_else(|| anyhow::anyhow!("EXEC_RPC_URL is required when --execute is passed"))?;
+        let flashbots_relay = env::var("FLASHBOTS_RELAY")
             .ok()
             .filter(|v| !v.trim().is_empty())
             .map(|v| url::Url::parse(&v))
             .transpose()
-            .map_err(|e| anyhow::anyhow!(\"invalid FLASHBOTS_RELAY: {e}\"))?;
-        let builder_relays: Vec<url::Url> = env::var(\"BUILDER_RELAYS\")
+            .map_err(|e| anyhow::anyhow!("invalid FLASHBOTS_RELAY: {e}"))?;
+        let builder_relays: Vec<url::Url> = env::var("BUILDER_RELAYS")
             .ok()
             .filter(|v| !v.trim().is_empty())
             .map(|v| {
                 v.split(',')
                     .map(|s| {
                         let s = s.trim();
-                        url::Url::parse(s).map_err(|e| anyhow::anyhow!(\"invalid builder relay {s}: {e}\"))
+                        url::Url::parse(s).map_err(|e| anyhow::anyhow!("invalid builder relay {s}: {e}"))
                     })
                     .collect::<Result<Vec<_>, anyhow::Error>>()
             })
             .transpose()?
             .unwrap_or_default();
-        let min_profit_wei: U256 = env::var(\"EXEC_MIN_PROFIT_WEI\")
+        let min_profit_wei: U256 = env::var("EXEC_MIN_PROFIT_WEI")
             .ok()
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(U256::ZERO);
-        let confirmations: u64 = env::var(\"EXEC_CONFIRMATIONS\")
+        let confirmations: u64 = env::var("EXEC_CONFIRMATIONS")
             .ok()
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(1);
@@ -140,5 +148,8 @@ async fn main() -> Result<()> {
         None
     };
 
-    run_scanner(settings, exec_config.map(Arc::new)).await
+    // Share exec_config with the API server so /api/execute can use it.
+    api_state.exec_config = exec_config.clone().map(Arc::new);
+
+    run_scanner(settings, exec_config.map(Arc::new), recent_opportunities).await
 }

@@ -18,7 +18,9 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use alloy::primitives::{Address, B256, Bytes, TxKind, U256};
 use chrono::{SecondsFormat, Utc};
+use mempool_scanner::exec::{execute_liquidation, ExecConfig, LiquidationOpportunity};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
@@ -27,7 +29,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::services::ServeDir;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Shared application state for the API server.
 #[derive(Clone)]
@@ -35,12 +37,17 @@ pub struct AppState {
     pub hits_path: PathBuf,
     pub liquidations_path: PathBuf,
     pub audit_path: PathBuf,
+    /// Operator execution config (only set when `--execute` is passed).
+    pub exec_config: Option<Arc<ExecConfig>>,
+    /// Recently detected liquidation opportunities, keyed by opportunity id.
+    /// Populated by the scanner pipeline so `/api/execute` can look them up.
+    pub recent_opportunities: Arc<RwLock<HashMap<String, LiquidationOpportunity>>>,
     /// Last execution result for the UI to poll.
     pub last_exec: Arc<RwLock<Option<ExecResult>>>,
 }
 
 /// Result of a `/api/execute` call, surfaced to the UI.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct ExecResult {
     pub timestamp: String,
     pub opportunity_id: String,
@@ -65,6 +72,8 @@ impl AppState {
             hits_path: PathBuf::from("logs/hits.jsonl"),
             liquidations_path: PathBuf::from("logs/liquidations.json"),
             audit_path: PathBuf::from("logs/exec_audit.jsonl"),
+            exec_config: None,
+            recent_opportunities: Arc::new(RwLock::new(HashMap::new())),
             last_exec: Arc::new(RwLock::new(None)),
         }
     }
@@ -75,7 +84,22 @@ impl AppState {
             hits_path: p.join("hits.jsonl"),
             liquidations_path: p.join("liquidations.json"),
             audit_path: p.join("exec_audit.jsonl"),
+            exec_config: None,
+            recent_opportunities: Arc::new(RwLock::new(HashMap::new())),
             last_exec: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Store a detected liquidation opportunity so the API can execute it later.
+    pub fn record_opportunity(&self, id: String, opp: LiquidationOpportunity) {
+        let mut guard = self.recent_opportunities.write().expect("recent_opportunities lock");
+        guard.insert(id, opp);
+        // Keep only the most recent 200 opportunities
+        if guard.len() > 200 {
+            let oldest: Vec<String> = guard.keys().cloned().take(guard.len() - 200).collect();
+            for k in oldest {
+                guard.remove(&k);
+            }
         }
     }
 }
@@ -86,7 +110,6 @@ pub fn router(state: AppState) -> Router {
 
     Router::new()
         // --- Static file serving (web UI) — ServeDir at / serves files from web/.
-        // Navigate to /liquidations.html for the execution UI.
         .route_service("/", ServeDir::new("web"))
         // --- JSON API ---
         .route("/api/hits", get(get_hits))
@@ -224,7 +247,7 @@ async fn get_liquidations(
 /// started with `--execute` (i.e. `EXEC_PRIVATE_KEY` and `EXEC_RPC_URL` are
 /// set in the environment).
 async fn post_execute(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(payload): Json<Value>,
 ) -> Json<Value> {
     let opportunity_id = payload
@@ -233,14 +256,101 @@ async fn post_execute(
         .unwrap_or("")
         .to_string();
 
-    let _ = opportunity_id; // placeholder — real execution wired to scanner's exec_config
+    let timestamp = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
-    Json(json!({
-        "success": false,
-        "error": "execution endpoint requires --execute mode with EXEC_PRIVATE_KEY and EXEC_RPC_URL set",
-        "opportunity_id": opportunity_id,
-        "outcome": "skipped",
-    }))
+    // Safety rail: execution requires `--execute` mode with EXEC_PRIVATE_KEY set.
+    let Some(cfg) = &state.exec_config else {
+        let result = ExecResult {
+            timestamp,
+            opportunity_id: opportunity_id.clone(),
+            success: false,
+            tx_hash: None,
+            gas_spent_wei: "0".to_string(),
+            bounty_wei: "0".to_string(),
+            net_profit_wei: "0".to_string(),
+            outcome: "skipped".to_string(),
+            error: Some("execution disabled: --execute not passed".to_string()),
+        };
+        *state.last_exec.write().expect("last_exec lock") = Some(result.clone());
+        return Json(json!(result));
+    };
+
+    // Look up the opportunity from recently detected liquidations.
+    let Some(opportunity) = state
+        .recent_opportunities
+        .read()
+        .expect("recent_opportunities lock")
+        .get(&opportunity_id)
+        .cloned()
+    else {
+        let result = ExecResult {
+            timestamp,
+            opportunity_id: opportunity_id.clone(),
+            success: false,
+            tx_hash: None,
+            gas_spent_wei: "0".to_string(),
+            bounty_wei: "0".to_string(),
+            net_profit_wei: "0".to_string(),
+            outcome: "skipped".to_string(),
+            error: Some(format!("opportunity not found: {opportunity_id}")),
+        };
+        *state.last_exec.write().expect("last_exec lock") = Some(result.clone());
+        return Json(json!(result));
+    };
+
+    // Run the simulation gate + sign + broadcast (non-bypassable simulation gate).
+    match execute_liquidation(cfg, &opportunity).await {
+        Ok(outcome) => {
+            let (tx_hash, success, gas_spent, bounty, net_profit, outcome_str) =
+                match &outcome {
+                    mempool_scanner::exec::ExecOutcome::Confirmed { tx_hash, block: _ } => {
+                        (Some(format!("{tx_hash:#x}")), true, "0".to_string(), opportunity.gross_profit_wei.to_string(), opportunity.gross_profit_wei.to_string(), "confirmed".to_string())
+                    }
+                    mempool_scanner::exec::ExecOutcome::Reverted { tx_hash, block: _ } => {
+                        (Some(format!("{tx_hash:#x}")), false, "0".to_string(), "0".to_string(), "0".to_string(), "reverted".to_string())
+                    }
+                    mempool_scanner::exec::ExecOutcome::Broadcast { tx_hash } => {
+                        (Some(format!("{tx_hash:#x}")), true, "0".to_string(), opportunity.gross_profit_wei.to_string(), opportunity.gross_profit_wei.to_string(), "broadcast".to_string())
+                    }
+                    mempool_scanner::exec::ExecOutcome::Simulated { profit } => {
+                        (None, true, "0".to_string(), profit.to_string(), profit.to_string(), "simulated".to_string())
+                    }
+                    mempool_scanner::exec::ExecOutcome::Skipped { reason } => {
+                        (None, false, "0".to_string(), "0".to_string(), "0".to_string(), format!("skipped: {reason}"))
+                    }
+                };
+
+            let result = ExecResult {
+                timestamp,
+                opportunity_id: opportunity_id.clone(),
+                success,
+                tx_hash,
+                gas_spent_wei: gas_spent,
+                bounty_wei: bounty,
+                net_profit_wei: net_profit,
+                outcome: outcome_str,
+                error: if success { None } else { Some(outcome_str.clone()) },
+            };
+            *state.last_exec.write().expect("last_exec lock") = Some(result.clone());
+            Json(json!(result))
+        }
+        Err(e) => {
+            warn!("execute_liquidation failed: {e}");
+            let result = ExecResult {
+                timestamp,
+                opportunity_id: opportunity_id.clone(),
+                success: false,
+                tx_hash: None,
+                gas_spent_wei: "0".to_string(),
+                bounty_wei: "0".to_string(),
+                net_profit_wei: "0".to_string(),
+                outcome: "error".to_string(),
+                error: Some(e.to_string()),
+            };
+            *state.last_exec.write().expect("last_exec lock") = Some(result.clone());
+            Json(json!(result))
+        }
+    }
 }
 
 /// GET /api/audit-logs — return the contents of `logs/exec_audit.jsonl`.
