@@ -18,15 +18,16 @@ skip = []
 
 [licenses]
 # Allow common permissive licenses used by the dependency tree.
+# Each entry is a single SPDX license identifier (no OR / WITH / slash
+# operators). cargo-deny evaluates each license in a crate's expression
+# against this list, so dual-licensed crates (e.g. "MIT OR Apache-2.0")
+# are covered when both "MIT" and "Apache-2.0" are listed.
 allow = [
   "MIT",
   "Apache-2.0",
-  "MIT OR Apache-2.0",
-  "MIT/Apache-2.0",
   "BSD-3-Clause",
   "Unicode-3.0",
   "Unlicense",
-  "Unlicense/MIT",
   "ISC",
   "CDLA-Permissive-2.0",
 ]
