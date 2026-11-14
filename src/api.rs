@@ -118,6 +118,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/quality", get(get_quality))
         .route("/api/liquidations", get(get_liquidations))
         .route("/api/execute", post(post_execute))
+        .route("/api/keepers", get(get_keepers))
         .route("/api/audit-logs", get(get_audit_logs))
         .route("/api/audit-logs/download", get(download_audit_logs))
         .route("/api/last-exec", get(get_last_exec))
@@ -409,6 +410,35 @@ async fn get_last_exec(
             "error": "no execution has been attempted",
         })),
     }
+}
+
+/// GET /api/keepers — return liquidatable borrower data from the keeper.
+async fn get_keepers(
+    State(state): State<Arc<AppState>>,
+) -> Json<Value> {
+    let opportunities = state
+        .recent_opportunities
+        .read()
+        .await;
+
+    let keepers: Vec<Value> = opportunities
+        .values()
+        .map(|opp| {
+            json!({
+                "id": opp.id,
+                "borrower": format!("{:#x}", opp.borrower.unwrap_or_default()),
+                "category": opp.category,
+                "gross_profit_wei": opp.gross_profit_wei.to_string(),
+                "repay_amount_wei": opp.repay_amount.map(|a| a.to_string()).unwrap_or_default(),
+                "summary": opp.summary,
+            })
+        })
+        .collect();
+
+    Json(json!({
+        "keepers": keepers,
+        "count": keepers.len(),
+    }))
 }
 
 /// Start the HTTP API server on the given address.

@@ -9,19 +9,21 @@
 //! to serve the execution UI (`web/`) and JSON endpoints for hits,
 //! liquidations, and execution control.
 
-use alloy::primitives::U256;
+use alloy::primitives::{Address, U256};
 use anyhow::Result;
 use mempool_scanner::abi::REGISTRY;
 use mempool_scanner::api::{start_api_server, AppState};
 use mempool_scanner::config::Settings;
 use mempool_scanner::exec::{load_signer_from_env, ExecConfig};
+use mempool_scanner::keeper::Keeper;
+use mempool_scanner::oracle::PythOracle;
 use mempool_scanner::pipeline::run_scanner;
 use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::error;
+use tracing::{error, warn};
 use tracing_subscriber::EnvFilter;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -81,6 +83,50 @@ async fn main() -> Result<()> {
 
     let mut api_state = AppState::new();
     api_state.recent_opportunities = recent_opportunities.clone();
+
+    // --- Keeper: Aave V3 health factor polling ---
+    let keeper = Arc::new(
+        Keeper::new(&settings.state_rpc, recent_opportunities.clone()).await?,
+    );
+
+    // Add tracked borrowers from env (comma-separated addresses).
+    if let Ok(borrowers) = env::var("TRACKED_BORROWERS") {
+        for addr in borrowers.split(',') {
+            let addr = addr.trim();
+            if !addr.is_empty() {
+                if let Ok(parsed) = addr.parse::<Address>() {
+                    keeper.add_borrower(parsed).await;
+                }
+            }
+        }
+    }
+
+    // --- Oracle: Pyth price feed triggers keeper polls ---
+    let eth_usd_feed_id = env::var("PYTH_ETH_USD_FEED_ID").unwrap_or_else(|_| {
+        "0xff61491a931112ff13428fe0603a2e3e5b4f6c7c0c6e7c6c6c6c6c6c6c6c6c6".to_string()
+    });
+
+    let mut oracle = PythOracle::new(
+        &env::var("PYTH_WS_URL")
+            .unwrap_or_else(|_| "wss://hermes.pyth.network".to_string()),
+        vec![eth_usd_feed_id],
+    );
+
+    let keeper_for_oracle = keeper.clone();
+    oracle.on_price_update(move |_update| {
+        let keeper = keeper_for_oracle.clone();
+        tokio::spawn(async move {
+            if let Err(e) = keeper.poll_borrowers().await {
+                warn!("Keeper poll failed: {e}");
+            }
+        });
+    });
+
+    let oracle_handle = tokio::spawn(async move {
+        if let Err(e) = oracle.run().await {
+            error!(%e, "Oracle stopped");
+        }
+    });
 
     let api_addr: SocketAddr = env::var("API_ADDR")
         .ok()
@@ -152,5 +198,10 @@ async fn main() -> Result<()> {
     // Share exec_config with the API server so /api/execute can use it.
     api_state.exec_config = exec_config.clone().map(Arc::new);
 
-    run_scanner(settings, exec_config.map(Arc::new), recent_opportunities).await
+    run_scanner(settings, exec_config.map(Arc::new), recent_opportunities).await?;
+
+    oracle_handle.abort();
+    let _ = oracle_handle.await;
+
+    Ok(())
 }
