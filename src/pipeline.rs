@@ -687,7 +687,9 @@ async fn ingestion_supervisor(
     exec_config: Option<Arc<ExecConfig>>,
     recent_opportunities: Arc<RwLock<HashMap<String, LiquidationOpportunity>>>,
 ) -> Result<()> {
-    let sim_sem = Arc::new(Semaphore::new(settings.worker_concurrency));
+    // Simulations are the RPC-heavy stage, so they get their own small budget
+    // (SIM_CONCURRENCY, default 2) rather than sharing worker_concurrency.
+    let sim_sem = Arc::new(Semaphore::new(settings.sim_concurrency));
     let fetch_sem = Arc::new(Semaphore::new((settings.worker_concurrency * 2).clamp(8, 24)));
     let sim_params = Arc::new(SimulationParams {
         max_lag: settings.max_lag,

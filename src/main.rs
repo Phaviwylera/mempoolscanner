@@ -23,7 +23,7 @@ use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -104,32 +104,68 @@ async fn main() -> Result<()> {
         }
     }
 
-    // --- Oracle: Pyth price feed triggers keeper polls ---
-    let eth_usd_feed_id = env::var("PYTH_ETH_USD_FEED_ID").unwrap_or_else(|_| {
-        "0xff61491a931112ff13428fe0603a2e3e5b4f6c7c0c6e7c6c6c6c6c6c6c6c6c6".to_string()
-    });
+    // --- Keeper trigger: interval poll, with Pyth as an optional addition ---
+    //
+    // The keeper used to be driven ONLY by Pyth price updates, which meant that
+    // when the Pyth socket could not connect the keeper never polled at all and
+    // recent_opportunities stayed permanently empty. A plain timer removes that
+    // single point of failure, so health factors are refreshed regardless.
+    //
+    // KEEPER_POLL_SECONDS=0 disables the timer.
+    let keeper_poll_seconds: u64 = env::var("KEEPER_POLL_SECONDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
 
-    let mut oracle = PythOracle::new(
-        &env::var("PYTH_WS_URL")
-            .unwrap_or_else(|_| "wss://hermes.pyth.network".to_string()),
-        vec![eth_usd_feed_id],
-    );
-
-    let keeper_for_oracle = keeper.clone();
-    oracle.on_price_update(move |_update| {
-        let keeper = keeper_for_oracle.clone();
+    if keeper_poll_seconds > 0 {
+        let keeper_for_timer = keeper.clone();
         tokio::spawn(async move {
-            if let Err(e) = keeper.poll_borrowers().await {
-                warn!("Keeper poll failed: {e}");
+            let mut ticker =
+                tokio::time::interval(std::time::Duration::from_secs(keeper_poll_seconds));
+            // Skip missed ticks rather than firing a burst after a slow poll.
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                if let Err(e) = keeper_for_timer.poll_borrowers().await {
+                    warn!("Keeper poll failed: {e}");
+                }
             }
         });
-    });
+        info!("Keeper polling every {keeper_poll_seconds}s");
+    }
 
-    let oracle_handle = tokio::spawn(async move {
-        if let Err(e) = oracle.run().await {
-            error!(%e, "Oracle stopped");
+    // Pyth is opt-in: set PYTH_WS_URL to enable it. The public Hermes socket is
+    // no longer openly reachable (the bare host 404s and /ws answers 401), so
+    // enabling it without credentials only produces reconnect warnings.
+    let oracle_handle = match env::var("PYTH_WS_URL") {
+        Ok(ws_url) if !ws_url.trim().is_empty() => {
+            // Real Crypto.ETH/USD feed id from the Hermes price_feeds index.
+            let eth_usd_feed_id = env::var("PYTH_ETH_USD_FEED_ID").unwrap_or_else(|_| {
+                "0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace".to_string()
+            });
+
+            let mut oracle = PythOracle::new(ws_url.trim(), vec![eth_usd_feed_id]);
+            let keeper_for_oracle = keeper.clone();
+            oracle.on_price_update(move |_update| {
+                let keeper = keeper_for_oracle.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = keeper.poll_borrowers().await {
+                        warn!("Keeper poll failed: {e}");
+                    }
+                });
+            });
+            info!("Pyth oracle enabled at {}", ws_url.trim());
+            Some(tokio::spawn(async move {
+                if let Err(e) = oracle.run().await {
+                    error!(%e, "Oracle stopped");
+                }
+            }))
         }
-    });
+        _ => {
+            info!("Pyth oracle disabled (set PYTH_WS_URL to enable); keeper runs on its timer");
+            None
+        }
+    };
 
     let api_addr: SocketAddr = env::var("API_ADDR")
         .ok()
@@ -203,8 +239,10 @@ async fn main() -> Result<()> {
 
     run_scanner(settings, exec_config.map(Arc::new), recent_opportunities).await?;
 
-    oracle_handle.abort();
-    let _ = oracle_handle.await;
+    if let Some(handle) = oracle_handle {
+        handle.abort();
+        let _ = handle.await;
+    }
 
     Ok(())
 }

@@ -16,6 +16,11 @@ pub struct Settings {
     pub depth: u64,
     pub poll_seconds: f64,
     pub worker_concurrency: usize,
+    /// Concurrent revm simulations. Deliberately far below
+    /// `worker_concurrency`: each simulation fans out into many
+    /// eth_getStorageAt / eth_getBalance calls, so 8 at once is what
+    /// triggers provider rate limits (-32005).
+    pub sim_concurrency: usize,
     pub sim_timeout_ms: u64,
 }
 
@@ -69,6 +74,7 @@ impl Settings {
             depth: read_u64("FORK_CHECK_DEPTH", 1, 0),
             poll_seconds: read_f64("FORK_POLL_SECONDS", 3.0, 0.5),
             worker_concurrency: read_u64("WORKER_CONCURRENCY", 8, 1) as usize,
+            sim_concurrency: read_u64("SIM_CONCURRENCY", 2, 1) as usize,
             sim_timeout_ms: read_u64("SIM_TIMEOUT_MS", 6_000, 500),
         })
     }

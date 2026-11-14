@@ -225,6 +225,57 @@ impl fmt::Display for StateError {
 impl std::error::Error for StateError {}
 impl DBErrorMarker for StateError {}
 
+/// Backoff delays for retryable RPC failures: 3 retries after the first try.
+const RPC_RETRY_DELAYS_MS: [u64; 3] = [500, 1_000, 2_000];
+
+/// Whether an RPC error is worth retrying rather than surfacing.
+///
+/// Matches on the rendered error because providers disagree about where the
+/// code lives (some put it in `error.code`, some only in the message):
+///   -32005  rate limit exceeded / capacity exceeded
+///   -32001  resource (block/state) not found yet at the requested height
+/// HTTP 429 and plain "rate limit" wording are included for the same reason.
+///
+/// Deliberately narrow: a bad request or a reverted call must NOT be retried.
+pub(crate) fn is_retryable_rpc_error(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("-32005")
+        || m.contains("-32001")
+        || m.contains("rate limit")
+        || m.contains("too many requests")
+        || m.contains("429 too many requests")
+        || m.contains("capacity exceeded")
+}
+
+/// Run `op`, retrying retryable RPC errors with exponential backoff.
+///
+/// Four attempts total: immediate, then +500ms, +1s, +2s. A non-retryable
+/// error returns immediately, so this never masks a genuine failure.
+pub(crate) async fn with_rpc_retry<T, E, F, Fut>(what: &str, mut op: F) -> Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    for delay_ms in RPC_RETRY_DELAYS_MS {
+        match op().await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                if !is_retryable_rpc_error(&e.to_string()) {
+                    return Err(e);
+                }
+                debug!(
+                    "{what}: retryable RPC error, backing off {delay_ms}ms: {}",
+                    one_line_str(&e.to_string())
+                );
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+        }
+    }
+    // Final attempt: whatever it returns is the answer.
+    op().await
+}
+
 pub trait StateBackend: Send + Sync {
     fn basic(
         &self,
@@ -309,12 +360,15 @@ impl StateBackend for RpcStateBackend {
             }
 
             let bid = BlockId::number(block);
-            let nonce_fut = self.provider.get_transaction_count(address).block_id(bid);
-            let bal_fut = self.provider.get_balance(address).block_id(bid);
-            let code_fut = self.provider.get_code_at(address).block_id(bid);
-
-            let (nonce, balance, raw_code) = tokio::try_join!(nonce_fut, bal_fut, code_fut)
-                .map_err(|e| StateError(one_line_str(&e.to_string())))?;
+            // Rebuilt per attempt: alloy call futures are single-use.
+            let (nonce, balance, raw_code) = with_rpc_retry("basic", || async move {
+                let nonce_fut = self.provider.get_transaction_count(address).block_id(bid);
+                let bal_fut = self.provider.get_balance(address).block_id(bid);
+                let code_fut = self.provider.get_code_at(address).block_id(bid);
+                tokio::try_join!(nonce_fut, bal_fut, code_fut)
+            })
+            .await
+            .map_err(|e| StateError(one_line_str(&e.to_string())))?;
 
             let info = if nonce == 0 && balance.is_zero() && raw_code.is_empty() {
                 None
@@ -390,12 +444,14 @@ impl StateBackend for RpcStateBackend {
             }
 
             let bid = BlockId::number(block);
-            let value: U256 = self
-                .provider
-                .get_storage_at(address, slot)
-                .block_id(bid)
-                .await
-                .map_err(|e| StateError(one_line_str(&e.to_string())))?;
+            let value: U256 = with_rpc_retry("storage", || async move {
+                self.provider
+                    .get_storage_at(address, slot)
+                    .block_id(bid)
+                    .await
+            })
+            .await
+            .map_err(|e| StateError(one_line_str(&e.to_string())))?;
 
             let mut wguard = self.windowed.write().expect("windowed write");
             wguard.advance(block);
@@ -583,5 +639,85 @@ impl DatabaseAsyncRef for PinnedStateView {
 
     async fn block_hash_async_ref(&self, number: u64) -> Result<B256, Self::Error> {
         self.backend.block_hash(number).await
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn classifies_rate_limit_and_missing_block_as_retryable() {
+        assert!(is_retryable_rpc_error(
+            "server returned an error response: error code -32005: Rate limit exceeded."
+        ));
+        assert!(is_retryable_rpc_error("error code -32001: block not found"));
+        assert!(is_retryable_rpc_error("HTTP status 429 Too Many Requests"));
+        assert!(is_retryable_rpc_error("Capacity Exceeded"));
+    }
+
+    #[test]
+    fn does_not_retry_genuine_failures() {
+        // Retrying these would hide a real bug behind 3.5s of backoff.
+        assert!(!is_retryable_rpc_error("execution reverted: 45"));
+        assert!(!is_retryable_rpc_error(
+            "error code -32602: invalid argument 0"
+        ));
+        assert!(!is_retryable_rpc_error("error code -32000: header not found"));
+        assert!(!is_retryable_rpc_error("invalid json response"));
+    }
+
+    #[tokio::test]
+    async fn succeeds_without_retrying_on_first_success() {
+        let calls = AtomicUsize::new(0);
+        let out: Result<u32, String> = with_rpc_retry("t", || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(7u32)
+        })
+        .await;
+        assert_eq!(out.unwrap(), 7);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "should not retry a success");
+    }
+
+    #[tokio::test]
+    async fn returns_non_retryable_error_immediately() {
+        let calls = AtomicUsize::new(0);
+        let out: Result<u32, String> = with_rpc_retry("t", || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err("execution reverted".to_string())
+        })
+        .await;
+        assert!(out.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "must not back off");
+    }
+
+    #[tokio::test]
+    async fn recovers_after_transient_rate_limits() {
+        let calls = AtomicUsize::new(0);
+        let out: Result<u32, String> = with_rpc_retry("t", || async {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            if n < 2 {
+                Err("error code -32005: Rate limit exceeded".to_string())
+            } else {
+                Ok(42u32)
+            }
+        })
+        .await;
+        assert_eq!(out.unwrap(), 42);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn gives_up_after_four_attempts() {
+        let calls = AtomicUsize::new(0);
+        let out: Result<u32, String> = with_rpc_retry("t", || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err("-32005 rate limit".to_string())
+        })
+        .await;
+        assert!(out.is_err());
+        // immediate + 500ms + 1s + 2s == 4 calls, then surface the error.
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
     }
 }

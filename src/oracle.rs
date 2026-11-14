@@ -86,7 +86,9 @@ impl PythOracle {
                     let (mut sink, mut stream) = ws_stream.split();
 
                     // Send subscription.
-                    if let Err(e) = sink.send(Message::Text(subscribe_payload.clone())).await {
+                    if let Err(e) = sink
+                        .send(Message::Text(subscribe_payload.clone().into()))
+                        .await {
                         warn!("Failed to send Pyth subscription: {e}");
                         continue;
                     }
@@ -95,7 +97,7 @@ impl PythOracle {
                     while let Some(msg) = stream.next().await {
                         match msg {
                             Ok(Message::Text(text)) => {
-                                if let Err(e) = Self::handle_message(&text, &on_price_update) {
+                                if let Err(e) = Self::handle_message(text.as_str(), &on_price_update) {
                                     warn!("Error handling Pyth message: {e}");
                                 }
                             }
