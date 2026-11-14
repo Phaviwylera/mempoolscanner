@@ -19,11 +19,14 @@
 
 use crate::abi::DecodedCall;
 use crate::sim::{HitRecord, ObservedTx};
+use alloy::consensus::SignableTransaction;
 use alloy::network::TxSigner;
 use alloy::primitives::{Address, B256, Bytes, TxKind, U256};
 use alloy::signers::local::PrivateKeySigner as LocalSigner;
 use anyhow::{anyhow, Result};
+use bytes::BufMut;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use url::Url;
 
 mod broadcast;
@@ -78,7 +81,7 @@ impl LiquidationOpportunity {
             gas_limit: observed.gas_limit,
             nonce: observed.nonce.unwrap_or(0),
             calldata: observed.calldata.clone(),
-            gross_profit_wei: U256::from_dec_str(record.decision.net_profit_wei.as_str())
+            gross_profit_wei: U256::from_str(record.decision.net_profit_wei.as_str())
                 .unwrap_or(U256::ZERO),
             borrower: None,
             collateral: decoded
@@ -92,7 +95,7 @@ impl LiquidationOpportunity {
             repay_amount: decoded
                 .amount_in
                 .as_ref()
-                .and_then(|a| U256::from_dec_str(a).ok()),
+                .and_then(|a| U256::from_str(a).ok()),
             selector: observed.selector_hex.clone(),
             summary: decoded.summary.clone(),
         }
@@ -214,7 +217,7 @@ pub async fn execute_liquidation(
         &encoded,
         tx_hash,
         opportunity.chain_id,
-        &cfg.flashbots_relay,
+        cfg.flashbots_relay.as_ref(),
         &cfg.builder_relays,
         cfg.confirmations,
     )
@@ -238,9 +241,12 @@ pub async fn execute_liquidation(
 
 /// Build and RLP-encode (EIP-2718) the signed transaction envelope for the
 /// opportunity. The signer's private key never leaves `sign.rs`.
-fn sign_transaction(signer: &LocalSigner, opportunity: &LiquidationOpportunity, chain_id: u64) -> Result<Vec<u8>> {
+async fn sign_transaction(
+    signer: &LocalSigner,
+    opportunity: &LiquidationOpportunity,
+    chain_id: u64,
+) -> Result<Vec<u8>> {
     use alloy::consensus::TxEip1559;
-    use alloy_rlp::BufMut;
 
     // The signer is left unbound so `sign_transaction_with_chain_id` uses the
     // transaction's own chain ID (set below) for EIP-155 replay protection.

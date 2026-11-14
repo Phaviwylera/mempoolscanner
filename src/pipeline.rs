@@ -879,6 +879,7 @@ fn dispatch_hash_tx(
                 &backend,
                 &sim_params,
                 &record_tx,
+                exec_config.clone(),
             );
         }
     });

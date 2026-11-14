@@ -3,10 +3,10 @@
 //! The public mempool is never used. If no private relay is configured the
 //! transaction is reported as `Skipped("no_private_relay")`.
 
+use crate::exec::ExecOutcome;
 use alloy::primitives::{B256, Bytes};
-use alloy::providers::{Provider, ProviderBuilder, DynProvider};
-use alloy::provider::ext::MevApi;
-use alloy::rpc_types_mev::{EthBundleHash, EthSendBundle};
+use alloy::providers::{ext::MevApi, Provider, ProviderBuilder, DynProvider};
+use alloy_rpc_types_mev::{EthBundleHash, EthSendBundle};
 use alloy::signers::local::PrivateKeySigner as LocalSigner;
 use anyhow::{anyhow, Result};
 use std::time::Duration;
@@ -16,8 +16,8 @@ use url::Url;
 ///
 /// Primary path: Flashbots Protect / MEV-Share `eth_sendBundle` with
 /// `with_auth(signer)`.
-//! Secondary path: fan-out to each configured builder relay.
-//! Returns `Ok(None)` when no private relay is available.
+/// Secondary path: fan-out to each configured builder relay.
+/// Returns `Ok(None)` when no private relay is available.
 pub async fn broadcast_and_confirm(
     rpc_url: &str,
     signer: &LocalSigner,
@@ -67,7 +67,6 @@ pub async fn broadcast_and_confirm(
             .get_transaction_receipt(tx_hash)
             .await
             .map_err(|e| anyhow!("receipt poll: {e}"))?
-            .flatten()
         {
             if let Some(block) = receipt.block_number {
                 if block >= mined_block.saturating_add(confirmations) {

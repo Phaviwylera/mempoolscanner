@@ -9,8 +9,8 @@
 
 use crate::exec::{ExecOutcome, LiquidationOpportunity};
 use crate::state::{BlockSnapshot, PinnedStateView, RpcStateBackend, StateBackend};
-use alloy::primitives::{Address, B256, U256};
-use alloy::providers::ProviderBuilder;
+use alloy::primitives::{B256, U256};
+use alloy::providers::{Provider, ProviderBuilder};
 use anyhow::{anyhow, Result};
 use revm::context::TxEnv;
 use revm::context_interface::block::BlobExcessGasAndPrice;
@@ -51,7 +51,7 @@ pub async fn simulate_with_backend(
     min_profit: U256,
     builder_bid: U256,
 ) -> Result<ExecOutcome> {
-    let gas_used = simulate_gas_used(&backend, block, opportunity).await?;
+    let gas_used = simulate_gas_used(backend.clone(), block, (*opportunity).clone()).await?;
 
     // gas_price: use the opportunity context base fee estimate. 1 gwei placeholder
     // that is overwritten by the live base fee when a state snapshot is available.
@@ -75,9 +75,9 @@ pub async fn simulate_with_backend(
 
 /// Execute the opportunity's calldata in `revm` at `block` and return gas used.
 async fn simulate_gas_used(
-    backend: &Arc<dyn StateBackend>,
+    backend: Arc<dyn StateBackend>,
     block: u64,
-    opportunity: &LiquidationOpportunity,
+    opportunity: LiquidationOpportunity,
 ) -> Result<u64> {
     let snap = BlockSnapshot {
         number: block,
@@ -86,7 +86,7 @@ async fn simulate_gas_used(
     let handle = tokio::runtime::Handle::current();
     let joined = tokio::task::spawn_blocking(move || {
         let view = PinnedStateView {
-            backend: backend.clone(),
+            backend,
             block,
         };
         let mut cache_db = CacheDB::new(AsyncDb::with_handle(view, handle));
