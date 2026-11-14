@@ -3,7 +3,7 @@
 [advisories]
 ignore = []
 unmaintained = "all"
-yanked = "all"
+yanked = "deny"
 
 [bans]
 skip = []
