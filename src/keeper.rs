@@ -8,8 +8,6 @@
 use crate::exec::LiquidationOpportunity;
 use alloy::primitives::{address, Address, Bytes, U256};
 use alloy::providers::{DynProvider, Provider, ProviderBuilder};
-use alloy::rpc::types::TransactionRequest;
-use alloy::sol_types::SolCall;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,6 +27,7 @@ pub const LIQUIDATION_BONUS_BPS: u64 = 500;
 pub const FLASH_LIQ_GAS_UNITS: u64 = 380_000;
 
 alloy::sol! {
+    #[sol(rpc)]
     #[derive(Debug, PartialEq)]
     interface IPool {
         function getUserAccountData(address user) external view returns (
