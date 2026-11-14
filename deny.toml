@@ -1,7 +1,15 @@
 # cargo-deny configuration for mempool-scanner.
 
 [advisories]
-ignore = []
+ignore = [
+  # crypto-bigint v0.5.5: timing variability (RUSTSEC-2026-0387).
+  # Upstream fix is in v0.7.6 but revm 43.0.3 pins crypto-bigint 0.5.5;
+  # upgrading revm is out of scope for this release.
+  "RUSTSEC-2026-0387",
+  # paste v1.0.15: unmaintained (RUSTSEC-2024-0436).
+  # No safe upgrade available; used transitively by alloy/syn.
+  "RUSTSEC-2024-0436",
+]
 unmaintained = "all"
 yanked = "deny"
 
@@ -9,6 +17,17 @@ yanked = "deny"
 skip = []
 
 [licenses]
+# Allow common permissive licenses used by the dependency tree.
+{ license = "MIT" } = "allow"
+{ license = "Apache-2.0" } = "allow"
+{ license = "MIT OR Apache-2.0" } = "allow"
+{ license = "MIT/Apache-2.0" } = "allow"
+{ license = "BSD-3-Clause" } = "allow"
+{ license = "Unicode-3.0" } = "allow"
+{ license = "Unlicense" } = "allow"
+{ license = "Unlicense/MIT" } = "allow"
+{ license = "ISC" } = "allow"
+{ license = "CDLA-Permissive-2.0" } = "allow"
 
 [sources]
 
