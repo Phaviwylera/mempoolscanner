@@ -5,3 +5,10 @@ venv/
 logs/
 __pycache__/
 *.py[cod]
+
+# Foundry build artifacts
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+contracts/.forge-cache/
+# Vendored libs are intentionally committed — do NOT ignore contracts/lib/
