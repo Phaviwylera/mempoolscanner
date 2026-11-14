@@ -19,8 +19,9 @@ use mempool_scanner::pipeline::run_scanner;
 use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
-use tracing::{error, info};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tracing::error;
 use tracing_subscriber::EnvFilter;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
