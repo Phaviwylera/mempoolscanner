@@ -817,6 +817,7 @@ async fn ingestion_supervisor(
                                 &sim_params,
                                 &record_tx,
                                 exec_config.clone(),
+                                recent_opportunities.clone(),
                             );
                         }
                         _ = shutdown_rx.changed() => return Ok(()),
@@ -847,6 +848,7 @@ fn dispatch_hash_tx(
     sim_params: &Arc<SimulationParams>,
     record_tx: &mpsc::Sender<HitRecord>,
     exec_config: Option<Arc<ExecConfig>>,
+    recent_opportunities: Arc<RwLock<HashMap<String, LiquidationOpportunity>>>,
 ) {
     let Ok(fetch_permit) = fetch_sem.clone().try_acquire_owned() else {
         return;
