@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 use tracing::{info, warn};
 
 /// Shared application state for the API server.
@@ -119,9 +119,17 @@ pub fn router(state: AppState) -> Router {
         .allow_methods(Any)
         .allow_headers(Any);
 
+    // Vite SPA. `route_service("/", ...)` matched ONLY the exact path "/", so a
+    // built bundle's /assets/index-*.js 404'd. A fallback_service matches any
+    // path no route claimed, which serves the hashed assets; the inner fallback
+    // to index.html keeps client-side deep links working if a router is added.
+    let spa = ServeDir::new("web-dash/dist")
+        .fallback(ServeFile::new("web-dash/dist/index.html"));
+
     Router::new()
-        // --- Static file serving (web UI) — ServeDir at / serves files from web/.
-        .route_service("/", ServeDir::new("web"))
+        // --- Legacy vanilla UI, kept reachable at /legacy while the new
+        //     dashboard beds in. Serves the untouched web/ directory.
+        .nest_service("/legacy", ServeDir::new("web"))
         // --- JSON API ---
         .route("/api/hits", get(get_hits))
         .route("/api/quality", get(get_quality))
@@ -132,6 +140,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/audit-logs", get(get_audit_logs))
         .route("/api/audit-logs/download", get(download_audit_logs))
         .route("/api/last-exec", get(get_last_exec))
+        // Must come after the /api routes: a fallback only runs when no route
+        // matched, so it can never shadow the JSON API.
+        .fallback_service(spa)
         .layer(cors)
         .with_state(state)
 }

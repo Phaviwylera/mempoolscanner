@@ -1,0 +1,46 @@
+@import "tailwindcss";
+
+/* Terminal design tokens. Tailwind v4 is CSS-first: these generate the
+   background, text and border utilities, so there is no tailwind.config.js. */
+@theme {
+  --color-canvas: #0b0e14;
+  --color-card: #131722;
+  --color-edge: #1e293b;
+  --color-ink: #e2e8f0;
+  --color-muted: #94a3b8;
+  --color-profit: #22c55e;
+  --color-risk: #ef4444;
+  --color-warn: #f59e0b;
+
+  --font-mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-mono);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Thin terminal scrollbars */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #2d3b52;
+}
