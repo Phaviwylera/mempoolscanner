@@ -28,6 +28,15 @@
           <span class="chain-chip"><span class="eth-diamond">◆</span> AAVE V3 · ETHEREUM MAINNET</span>
           <span id="liq-feed-status" class="feed-status"><i></i><b>SYNCING POOL</b></span>
           <button id="liq-refresh-btn" class="icon-button" type="button" aria-label="Refresh Aave V3 positions" title="Refresh Aave V3 positions">↻</button>
+          <!-- Wallet connection -->
+          <div id="wallet-bar" class="wallet-bar" style="display:none;">
+            <span class="wallet-label">CONNECTED:</span>
+            <span id="wallet-address" class="wallet-address">—</span>
+            <button id="wallet-disconnect" class="wallet-btn" type="button">DISCONNECT</button>
+          </div>
+          <button id="wallet-connect" class="wallet-connect-btn" type="button">CONNECT WALLET</button>
+          <!-- Audit log viewer toggle -->
+          <button id="audit-toggle" class="audit-toggle-btn" type="button" title="Show execution audit log">AUDIT ↓</button>
         </div>
       </header>
 
@@ -292,6 +301,7 @@
                   <th>DEBT TO COVER (50%)</th>
                   <th>EST. FLASH BOUNTY (INR)</th>
                   <th>STATUS / SIMULATE</th>
+                  <th>REALRUN</th>
                 </tr>
               </thead>
               <tbody id="liq-positions-body">
@@ -309,6 +319,32 @@
             <span><i class="legend-dot cyan"></i> <span id="liq-shown-count">0</span> BORROWERS SHOWN (SORTED BY LOWEST HF)</span>
             <span>SNAPSHOT · <code>logs/liquidations.json</code></span>
             <span class="table-foot-right">POLLING EVERY 8 SEC</span>
+          </div>
+        </section>
+
+        <!-- Execution audit log panel -->
+        <section id="audit-panel" class="panel activity-panel" style="display:none;">
+          <div class="panel-head activity-head">
+            <div>
+              <div class="panel-kicker">EXECUTION / 06</div>
+              <h2>Execution audit log <button id="audit-download" class="audit-download-btn" type="button">DOWNLOAD JSONL</button></h2>
+            </div>
+            <div class="activity-tools"><span id="audit-count">0 entries</span></div>
+          </div>
+          <div class="table-scroll">
+            <table class="liq-table">
+              <thead>
+                <tr>
+                  <th>TIMESTAMP</th>
+                  <th>OPPORTUNITY</th>
+                  <th>CHAIN</th>
+                  <th>PROFIT (INR)</th>
+                  <th>TX HASH</th>
+                  <th>OUTCOME</th>
+                </tr>
+              </thead>
+              <tbody id="audit-body"></tbody>
+            </table>
           </div>
         </section>
 

@@ -28,6 +28,33 @@
 .fork-row-track{display:block;height:6px;background:#151824;border:1px solid #1d2130;border-radius:3px;overflow:hidden}
 .fork-row-track b{display:block;height:100%;background:var(--cyan);border-radius:2px;transition:width .35s ease}
 .fork-row em{font-style:normal;color:var(--muted);text-align:right;letter-spacing:.06em}
+
+/* ---- Wallet bar & connect button ---- */
+.wallet-bar{display:flex;align-items:center;gap:10px;font:8px var(--mono);color:#afb5c6;letter-spacing:.08em}
+.wallet-label{color:var(--muted)}
+.wallet-address{color:#ffd2ec;font-weight:600;font-family:var(--mono)}
+.wallet-btn{border:1px solid #3a3040;background:#14121e;color:#e0b3ff;padding:4px 8px;border-radius:3px;font:7px var(--mono);cursor:pointer}
+.wallet-btn:hover{border-color:#a68aff;color:var(--white)}
+.wallet-connect-btn{border:1px solid var(--pink);background:transparent;color:var(--pink);padding:6px 12px;border-radius:4px;font:7px var(--mono);cursor:pointer;letter-spacing:.1em}
+.wallet-connect-btn:hover{background:var(--pink);color:#07080d}
+.audit-toggle-btn{border:1px solid #2d3d3c;background:transparent;color:#62d8c7;padding:5px 10px;border-radius:4px;font:7px var(--mono);cursor:pointer}
+.audit-toggle-btn:hover{border-color:#62d8c7;color:var(--white)}
+.audit-download-btn{border:1px solid var(--cyan);background:transparent;color:var(--cyan);padding:5px 10px;border-radius:4px;font:7px var(--mono);cursor:pointer;margin-left:10px}
+.audit-download-btn:hover{background:var(--cyan);color:#07080d}
+
+/* ---- REALRUN button ---- */
+.liq-realrun-btn{border:1px solid #ffcf6e;background:transparent;color:#ffcf6e;padding:5px 9px;border-radius:4px;font:7px var(--mono);font-weight:700;cursor:pointer;letter-spacing:.08em;white-space:nowrap}
+.liq-realrun-btn:hover{background:rgba(255,207,110,.12);border-color:#ffd88a}
+.liq-realrun-btn:disabled{border-color:#3a3238;color:#636770;cursor:not-allowed;opacity:.6}
+
+/* ---- Audit log panel ---- */
+#audit-panel{margin-top:14px}
+#audit-panel .panel-head{height:65px}
+#audit-panel table{width:100%;border-collapse:collapse;min-width:700px}
+#audit-panel th{text-align:left;font-size:7px;font-weight:400;color:#646b7c;padding:10px 12px;border-bottom:1px solid #1e222c}
+#audit-panel td{padding:10px 12px;border-bottom:1px solid #171b24;color:#a5abbb;font:8px var(--mono)}
+#audit-panel .liq-bounty-pos{color:var(--green)}
+#audit-panel .liq-bounty-proj{color:#f3c969}
 .fork-row[data-kind="candidate"] .fork-row-track b{background:var(--green)}
 .fork-row[data-kind="state_dependent"] .fork-row-track b{background:var(--violet)}
 .fork-row[data-kind="stale_fork"] .fork-row-track b{background:#f3c969}

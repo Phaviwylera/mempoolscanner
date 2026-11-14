@@ -60,6 +60,11 @@ zeroize = { version = "1.8", features = ["zeroize_derive"] }
 alloy-rpc-types-mev = "2.5"
 bytes = "1.0"
 
+# HTTP API server for the execution UI
+axum = "0.8"
+tower-http = { version = "0.6", features = ["fs"] }
+tokio-tungstenite = "0.21"
+
 [profile.release]
 opt-level = 3
 lto = "thin"
