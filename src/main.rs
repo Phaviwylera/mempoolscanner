@@ -47,8 +47,20 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let execute = flag(&args, "--execute");
-    let dry_run = flag(&args, "--dry-run");
+    // EXECUTION_MODE is the primary control; the older --execute / --dry-run
+    // flags still work and can only ever ADD restriction, never remove it.
+    let exec_mode_raw = env::var("EXECUTION_MODE").unwrap_or_default();
+    let exec_mode = match mempool_scanner::exec::ExecutionMode::parse(&exec_mode_raw) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(2);
+        }
+    };
+
+    let execute = exec_mode.is_enabled() || flag(&args, "--execute");
+    // --dry-run downgrades live to dry_run; it never upgrades.
+    let dry_run = exec_mode.is_dry_run() || flag(&args, "--dry-run");
 
     // Safety rail: `--execute` requires operator key material to be present in
     // the environment before we touch the network. Exit with a clear error
@@ -219,9 +231,36 @@ async fn main() -> Result<()> {
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(1);
 
+        // The deployed AaveV3Liquidator. Live mode refuses to start without
+        // it: broadcasting with no target contract would sign a transaction
+        // that cannot do anything useful.
+        let liquidator: Option<Address> = match env::var("EXEC_LIQUIDATOR_ADDRESS") {
+            Ok(v) if !v.trim().is_empty() => Some(
+                v.trim()
+                    .parse()
+                    .map_err(|e| anyhow::anyhow!("invalid EXEC_LIQUIDATOR_ADDRESS: {e}"))?,
+            ),
+            _ => None,
+        };
+
+        if !dry_run && liquidator.is_none() {
+            anyhow::bail!(
+                "EXECUTION_MODE=live requires EXEC_LIQUIDATOR_ADDRESS (the deployed \
+                 AaveV3Liquidator contract). Set it, or use EXECUTION_MODE=dry_run."
+            );
+        }
+
+        info!(
+            "execution mode: {} (broadcast {})",
+            exec_mode.as_str(),
+            if dry_run { "DISABLED" } else { "ENABLED" }
+        );
+
         Some(ExecConfig {
             enabled: true,
             dry_run,
+            liquidator,
+            mode: exec_mode,
             chain_id,
             rpc_url,
             signer: Some(signer),

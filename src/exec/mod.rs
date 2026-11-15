@@ -103,6 +103,53 @@ impl LiquidationOpportunity {
     }
 }
 
+/// How far the execution pipeline is allowed to go.
+///
+/// Parsed from `EXECUTION_MODE`. The default is [`ExecutionMode::Off`], so a
+/// scanner started with no configuration cannot spend anything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMode {
+    /// Observe only. Nothing is signed.
+    Off,
+    /// Simulate and sign, write the audit record, but never broadcast.
+    DryRun,
+    /// Simulate, sign and broadcast via Flashbots.
+    Live,
+}
+
+impl ExecutionMode {
+    /// Parse `EXECUTION_MODE`. Unknown values are an error rather than a
+    /// silent downgrade: mistyping "live" must not quietly disable execution,
+    /// and mistyping "off" must not quietly enable it.
+    pub fn parse(raw: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "" | "off" => Ok(Self::Off),
+            "dry_run" | "dryrun" => Ok(Self::DryRun),
+            "live" => Ok(Self::Live),
+            other => Err(anyhow!(
+                "EXECUTION_MODE must be one of off | dry_run | live (got {other:?})"
+            )),
+        }
+    }
+
+    pub fn is_enabled(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    pub fn is_dry_run(self) -> bool {
+        matches!(self, Self::DryRun)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::DryRun => "dry_run",
+            Self::Live => "live",
+        }
+    }
+}
+
 /// Operator configuration for the execution module.
 #[derive(Clone, Debug)]
 pub struct ExecConfig {
@@ -124,6 +171,11 @@ pub struct ExecConfig {
     pub min_profit_wei: U256,
     /// Blocks to wait for confirmation before returning `Confirmed`.
     pub confirmations: u64,
+    /// The deployed AaveV3Liquidator contract. Required in `live` mode: it is
+    /// the only address the execution path is allowed to call.
+    pub liquidator: Option<Address>,
+    /// Resolved execution mode, kept for logging and the API to report.
+    pub mode: ExecutionMode,
 }
 
 /// Outcome of an attempted execution.
@@ -310,4 +362,55 @@ fn append_audit(
     writeln!(file, "{line}")?;
     file.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod execution_mode_tests {
+    use super::ExecutionMode;
+
+    #[test]
+    fn unset_and_off_both_mean_off() {
+        assert_eq!(ExecutionMode::parse("").unwrap(), ExecutionMode::Off);
+        assert_eq!(ExecutionMode::parse("off").unwrap(), ExecutionMode::Off);
+        assert_eq!(ExecutionMode::parse("  OFF  ").unwrap(), ExecutionMode::Off);
+        assert!(!ExecutionMode::Off.is_enabled());
+    }
+
+    #[test]
+    fn dry_run_spellings_are_accepted_and_never_broadcast() {
+        for raw in ["dry_run", "dry-run", "DryRun", " DRY_RUN "] {
+            let m = ExecutionMode::parse(raw).unwrap_or_else(|e| panic!("{raw:?}: {e}"));
+            assert_eq!(m, ExecutionMode::DryRun, "{raw:?}");
+            assert!(m.is_enabled(), "{raw:?} must be enabled");
+            assert!(m.is_dry_run(), "{raw:?} must not broadcast");
+        }
+    }
+
+    #[test]
+    fn live_broadcasts() {
+        let m = ExecutionMode::parse("live").unwrap();
+        assert_eq!(m, ExecutionMode::Live);
+        assert!(m.is_enabled());
+        assert!(!m.is_dry_run(), "live must broadcast");
+    }
+
+    /// A typo must be loud. Defaulting a misspelled "live" to off would
+    /// silently stop a bot the operator believed was running; defaulting a
+    /// misspelled "off" to live would spend money they did not authorise.
+    #[test]
+    fn typos_are_rejected_not_defaulted() {
+        for raw in ["liv", "LIVE!", "dry", "on", "true", "1", "enabled"] {
+            assert!(
+                ExecutionMode::parse(raw).is_err(),
+                "{raw:?} must be rejected, not silently coerced"
+            );
+        }
+    }
+
+    #[test]
+    fn as_str_round_trips() {
+        for m in [ExecutionMode::Off, ExecutionMode::DryRun, ExecutionMode::Live] {
+            assert_eq!(ExecutionMode::parse(m.as_str()).unwrap(), m);
+        }
+    }
 }
