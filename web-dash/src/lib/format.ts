@@ -68,6 +68,30 @@ export function formatUsd(n: number | null | undefined, decimals = 2): string {
   });
 }
 
+/**
+ * Standard Aave V3 liquidation bonus for the common ETH/major-collateral
+ * reserves (500 bps). Used only as a UI *estimate* of the flash bounty when the
+ * keeper has no exact wei bounty and the snapshot has no computed plan.
+ */
+export const LIQUIDATION_BONUS = 0.05;
+
+/**
+ * Estimated gross flash bounty in USD: the liquidation bonus applied to the
+ * seizable collateral. You can never seize more collateral than the borrower
+ * has, so the base is min(debt, collateral). This is an approximation, clearly
+ * labelled "est" in the UI — the exact figure comes from the keeper (wei) or the
+ * snapshot plan when available.
+ */
+export function estBountyUsd(
+  debtUsd: number | null | undefined,
+  collateralUsd: number | null | undefined,
+): number {
+  const d = typeof debtUsd === "number" && Number.isFinite(debtUsd) ? debtUsd : 0;
+  const c =
+    typeof collateralUsd === "number" && Number.isFinite(collateralUsd) ? collateralUsd : 0;
+  return Math.min(d, c) * LIQUIDATION_BONUS;
+}
+
 /** 0x1234…cdef */
 export function shortAddr(a: string | null | undefined, lead = 6, tail = 4): string {
   if (!a) return "—";

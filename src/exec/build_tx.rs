@@ -399,6 +399,67 @@ pub async fn build_tx_from_opportunity(
     build_signed_liquidation_tx(signer, &inputs).await
 }
 
+/// Fully standalone builder: resolve the borrower's position **directly from
+/// chain** (Aave data provider), apply the close factor, and build the signed
+/// tx — with no dependency on the keeper's in-memory opportunity map or
+/// `TRACKED_BORROWERS`. Works for any address with an open Aave V3 position.
+///
+/// `mock_hf_wad`, when set, drives both the close-factor sizing and the
+/// pre-flight oracle override (testing).
+#[allow(clippy::too_many_arguments)]
+pub async fn build_tx_standalone(
+    signer: &LocalSigner,
+    rpc_url: &str,
+    chain_id: u64,
+    liquidator: Address,
+    user: Address,
+    mock_hf_wad: Option<U256>,
+    swap_fee: u32,
+    min_profit: U256,
+    gas_limit: u64,
+) -> Result<BuildTxReport> {
+    use crate::keeper::Keeper;
+    use std::collections::HashMap;
+    use tokio::sync::RwLock;
+
+    let keeper = Keeper::new(rpc_url, Arc::new(RwLock::new(HashMap::new()))).await?;
+
+    let selection = keeper.resolve_reserves(user).await;
+    let collateral = selection.collateral.ok_or_else(|| {
+        anyhow!("could not resolve a collateral reserve for {user:#x}: no open Aave V3 position, or the data provider was unreachable")
+    })?;
+    let debt_asset = selection.debt_asset.ok_or_else(|| {
+        anyhow!("could not resolve a debt reserve for {user:#x}: no open Aave V3 debt, or the data provider was unreachable")
+    })?;
+    if selection.debt_amount.is_zero() {
+        return Err(anyhow!("resolved zero debt for {user:#x}; nothing to liquidate"));
+    }
+
+    // Size debtToCover against the mock HF when mocking, else the live HF.
+    let hf = keeper.user_health_factor(user).await;
+    let effective_hf = mock_hf_wad.or(hf);
+    let debt_to_cover = match effective_hf {
+        Some(h) => close_factor_debt(selection.debt_amount, h),
+        None => selection.debt_amount / U256::from(2u8),
+    };
+
+    let inputs = BuildTxInputs {
+        rpc_url: rpc_url.to_string(),
+        chain_id,
+        liquidator,
+        user,
+        collateral,
+        debt_asset,
+        debt_to_cover,
+        swap_fee,
+        min_profit,
+        gas_limit,
+        mock_hf_wad,
+    };
+
+    build_signed_liquidation_tx(signer, &inputs).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

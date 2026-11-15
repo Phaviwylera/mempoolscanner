@@ -21,7 +21,7 @@ use axum::{
 use chrono::Utc;
 use crate::chainlink::ChainlinkEthUsd;
 use crate::exec::{
-    build_tx_from_opportunity, execute_liquidation, load_signer_from_env, simulate_raw_call,
+    build_tx_standalone, execute_liquidation, load_signer_from_env, simulate_raw_call,
     ExecConfig, ExecOutcome, LiquidationOpportunity, DEFAULT_SWAP_FEE,
 };
 use crate::state::{RpcStateBackend, StateBackend};
@@ -891,12 +891,17 @@ async fn post_simulate(
 // GET /api/build-tx/{address} — manual offline transaction builder
 // ---------------------------------------------------------------------------
 
-/// GET /api/build-tx/{address}
+/// GET /api/build-tx/{address}?mock_hf=<value>
 ///
-/// Resolves the borrower's opportunity, runs the revm pre-flight, signs ONE
-/// transaction targeting the AaveV3Liquidator contract, and returns the raw
-/// signed hex for the operator to inspect and broadcast themselves. It never
-/// broadcasts.
+/// Resolves the borrower's position **directly from chain** (no dependency on
+/// the keeper's opportunity map or `TRACKED_BORROWERS`), runs the revm
+/// pre-flight, signs ONE transaction targeting the AaveV3Liquidator contract,
+/// and returns the raw signed hex for the operator to inspect and broadcast
+/// themselves. It never broadcasts.
+///
+/// Optional `?mock_hf=0.95` lowers the collateral oracle price in the pre-flight
+/// only (testing), so a not-yet-underwater position's liquidation executes; the
+/// signed tx is unaffected.
 ///
 /// Signing needs key material: `EXEC_PRIVATE_KEY` (or keystore) plus
 /// `EXEC_LIQUIDATOR_ADDRESS` and a state RPC. This is independent of
@@ -905,29 +910,17 @@ async fn post_simulate(
 async fn get_build_tx(
     State(state): State<Arc<AppState>>,
     Path(address): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Json<Value> {
     let user: Address = match address.trim().parse() {
         Ok(a) => a,
         Err(e) => return Json(json!({ "success": false, "error": format!("invalid address {address:?}: {e}") })),
     };
 
-    // Locate the opportunity (by borrower first, then by id) — same as simulate.
-    let opportunity = {
-        let guard = state.recent_opportunities.read().await;
-        guard
-            .values()
-            .find(|o| o.borrower == Some(user))
-            .or_else(|| guard.values().find(|o| o.id.eq_ignore_ascii_case(address.trim())))
-            .cloned()
-    };
-    let Some(opportunity) = opportunity else {
-        return Json(json!({ "success": false, "error": "no opportunity found for address" }));
-    };
-
     let Some(rpc_url) = state.state_rpc.clone() else {
         return Json(json!({
             "success": false,
-            "error": "no state RPC configured; build-tx needs HTTP_RPC/WS_RPC for nonce, gas, and the pre-flight",
+            "error": "no state RPC configured; build-tx needs HTTP_RPC/WS_RPC for reserve resolution, nonce, gas, and the pre-flight",
         }));
     };
 
@@ -974,23 +967,25 @@ async fn get_build_tx(
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(380_000);
 
-    // health_factor_wad = None → the builder applies the conservative 50%
-    // close-factor cap. The CLI (`--build-tx`) reads the live HF for an exact cap.
-    match build_tx_from_opportunity(
-        &signer, &rpc_url, chain_id, liquidator, &opportunity, None, swap_fee, min_profit, gas_limit,
+    // Optional ?mock_hf=<float> → 1e18-scaled target for the fork-only override.
+    let mock_hf_wad: Option<U256> = params
+        .get("mock_hf")
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .map(|v| U256::from((v * 1e18).round().max(1.0) as u128));
+
+    match build_tx_standalone(
+        &signer, &rpc_url, chain_id, liquidator, user, mock_hf_wad, swap_fee, min_profit, gas_limit,
     )
     .await
     {
         Ok(report) => {
             let mut v = json!(report);
             v["success"] = json!(true);
-            v["opportunity_id"] = json!(opportunity.id);
             Json(v)
         }
         Err(e) => Json(json!({
             "success": false,
             "error": e.to_string(),
-            "opportunity_id": opportunity.id,
         })),
     }
 }

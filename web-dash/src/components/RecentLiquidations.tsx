@@ -1,5 +1,6 @@
 import { Receipt, Inbox } from "lucide-react";
 import { formatUsd, shortAddr } from "../lib/format";
+import CopyableAddress from "./CopyableAddress";
 import type { RecentLiquidation } from "../lib/api";
 
 export default function RecentLiquidations({
@@ -45,8 +46,8 @@ export default function RecentLiquidations({
                   </span>
                 </div>
                 <div className="mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5">
-                  <Pair k="borrower" v={shortAddr(borrower)} />
-                  <Pair k="liquidator" v={shortAddr(e.liquidator)} />
+                  <AddrPair k="borrower" v={borrower} />
+                  <AddrPair k="liquidator" v={e.liquidator} />
                   <Pair
                     k="debt repaid"
                     v={
@@ -78,6 +79,15 @@ function Pair({ k, v }: { k: string; v: string }) {
     <div className="flex justify-between gap-2">
       <span className="text-muted">{k}</span>
       <span className="tabular-nums text-ink">{v}</span>
+    </div>
+  );
+}
+
+function AddrPair({ k, v }: { k: string; v: string | null | undefined }) {
+  return (
+    <div className="flex justify-between gap-2">
+      <span className="text-muted">{k}</span>
+      <CopyableAddress address={v} className="text-ink" />
     </div>
   );
 }

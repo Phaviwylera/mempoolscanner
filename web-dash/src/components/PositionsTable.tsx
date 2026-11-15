@@ -3,14 +3,15 @@ import { ArrowDownWideNarrow, LoaderCircle, FlaskConical, FileSignature } from "
 import {
   BAND_BAR,
   BAND_TEXT,
+  estBountyUsd,
   formatHf,
   formatUsd,
   hfBand,
   hfPercent,
-  shortAddr,
   toBigInt,
   weiToEth,
 } from "../lib/format";
+import CopyableAddress from "./CopyableAddress";
 import type { Row } from "../lib/api";
 
 function StatusPill({ row }: { row: Row }) {
@@ -130,7 +131,7 @@ export default function PositionsTable({
                   }`}
                 >
                   <td className="px-4 py-2">
-                    <span className="text-ink">{shortAddr(r.user)}</span>
+                    <CopyableAddress address={r.user} className="text-ink" />
                     <span className="ml-2 text-[10px] text-muted">
                       {r.last_reserve_symbol}
                     </span>
@@ -148,18 +149,35 @@ export default function PositionsTable({
                     {r.liq_threshold_pct?.toFixed(2)}%
                   </td>
                   <td className="px-3 py-2 text-right tabular-nums">
-                    {r.bountyWeiHex ? (
-                      <span className="text-profit">
+                    {r.bountyWeiHex && toBigInt(r.bountyWeiHex) > 0n ? (
+                      <span
+                        className="text-profit"
+                        title="Exact live bounty from the keeper (wei)"
+                      >
                         {weiToEth(r.bountyWeiHex, 6)} ETH
                       </span>
                     ) : (
-                      <span
-                        className="text-muted"
-                        title="Keeper has no live wei bounty for this borrower; showing the snapshot USD estimate"
-                      >
-                        ${formatUsd(r.plan?.gross_bounty_usd)}
-                        <span className="ml-1 text-[9px] uppercase">usd</span>
-                      </span>
+                      (() => {
+                        // Prefer the snapshot plan's computed bounty; otherwise
+                        // estimate from the 5% Aave liquidation bonus on the
+                        // seizable collateral (min of debt/collateral).
+                        const plan = r.plan?.gross_bounty_usd;
+                        const usd =
+                          typeof plan === "number" && plan > 0
+                            ? plan
+                            : estBountyUsd(r.debt_usd, r.collateral_usd);
+                        return (
+                          <span
+                            className="text-profit"
+                            title="Estimated flash bounty: 5% Aave liquidation bonus on seizable collateral. The exact figure comes from the keeper once the borrower is tracked."
+                          >
+                            ${formatUsd(usd)}
+                            <span className="ml-1 text-[9px] uppercase text-muted">
+                              est
+                            </span>
+                          </span>
+                        );
+                      })()
                     )}
                   </td>
                   <td className="px-3 py-2">
