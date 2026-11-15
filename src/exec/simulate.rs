@@ -41,19 +41,37 @@ pub async fn simulate_liquidation(
         .await
         .map_err(|e| anyhow!("block number: {e}"))?;
     let target = latest.saturating_add(1);
+    // Use the latest block's real timestamp so revm does not run at timestamp 0,
+    // which underflow-panics Aave's interest accrual and price-cap adapters.
+    let block_ts = fetch_block_timestamp(&provider, latest).await;
     let backend: Arc<dyn StateBackend> = Arc::new(RpcStateBackend::new(provider));
-    simulate_with_backend(backend, target, opportunity, min_profit, builder_bid).await
+    simulate_with_backend(backend, target, block_ts, opportunity, min_profit, builder_bid).await
+}
+
+/// Fetch a block's unix timestamp, or 0 if unavailable (callers fall back to
+/// wall-clock). Keeps the panic-avoiding timestamp correct across clock skew.
+pub async fn fetch_block_timestamp(
+    provider: &alloy::providers::DynProvider,
+    block: u64,
+) -> u64 {
+    use alloy::eips::BlockNumberOrTag;
+    match provider.get_block_by_number(BlockNumberOrTag::Number(block)).await {
+        Ok(Some(b)) => b.header.timestamp,
+        _ => 0,
+    }
 }
 
 /// Simulate against an in-process backend (used by unit tests with mocked state).
 pub async fn simulate_with_backend(
     backend: Arc<dyn StateBackend>,
     block: u64,
+    block_timestamp: u64,
     opportunity: &LiquidationOpportunity,
     min_profit: U256,
     builder_bid: U256,
 ) -> Result<ExecOutcome> {
-    let gas_used = simulate_gas_used(backend.clone(), block, (*opportunity).clone()).await?;
+    let gas_used =
+        simulate_gas_used(backend.clone(), block, block_timestamp, (*opportunity).clone()).await?;
 
     // gas_price: use the opportunity context base fee estimate. 1 gwei placeholder
     // that is overwritten by the live base fee when a state snapshot is available.
@@ -83,11 +101,13 @@ pub async fn simulate_with_backend(
 async fn simulate_gas_used(
     backend: Arc<dyn StateBackend>,
     block: u64,
+    block_timestamp: u64,
     opportunity: LiquidationOpportunity,
 ) -> Result<u64> {
     let sim = simulate_raw_call(
         backend,
         block,
+        block_timestamp,
         opportunity.from,
         opportunity.to,
         opportunity.calldata.clone(),
@@ -129,14 +149,25 @@ pub struct CodeOverride {
 pub async fn simulate_raw_call(
     backend: Arc<dyn StateBackend>,
     block: u64,
+    block_timestamp: u64,
     from: Address,
     to: Address,
     calldata: Bytes,
     value: U256,
     gas_limit: u64,
 ) -> Result<RawSimulation> {
-    simulate_raw_call_with_overrides(backend, block, Vec::new(), from, to, calldata, value, gas_limit)
-        .await
+    simulate_raw_call_with_overrides(
+        backend,
+        block,
+        block_timestamp,
+        Vec::new(),
+        from,
+        to,
+        calldata,
+        value,
+        gas_limit,
+    )
+    .await
 }
 
 /// Like [`simulate_raw_call`], but with fork-only account bytecode overrides
@@ -146,6 +177,7 @@ pub async fn simulate_raw_call(
 pub async fn simulate_raw_call_with_overrides(
     backend: Arc<dyn StateBackend>,
     block: u64,
+    block_timestamp: u64,
     overrides: Vec<CodeOverride>,
     from: Address,
     to: Address,
@@ -153,6 +185,20 @@ pub async fn simulate_raw_call_with_overrides(
     value: U256,
     gas_limit: u64,
 ) -> Result<RawSimulation> {
+    // A zero timestamp underflow-panics any contract that does
+    // `block.timestamp - storedTimestamp` — Aave's interest accrual and
+    // Chainlink price-cap adapters both do. Prefer the forked block's real
+    // timestamp; fall back to wall-clock only when the caller could not fetch
+    // it (and clamp to a sane floor against a wrong system clock).
+    let effective_ts = if block_timestamp != 0 {
+        block_timestamp
+    } else {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+            .max(1_700_000_000)
+    };
     let snap = BlockSnapshot {
         number: block,
         ..Default::default()
@@ -196,7 +242,7 @@ pub async fn simulate_raw_call_with_overrides(
             })
             .modify_block_chained(|b| {
                 b.number = U256::from(block);
-                b.timestamp = U256::from(snap.timestamp);
+                b.timestamp = U256::from(effective_ts);
                 b.basefee = snap.base_fee;
                 b.beneficiary = snap.beneficiary;
                 b.gas_limit = snap.gas_limit.max(3_000_000);
@@ -313,6 +359,7 @@ mod tests {
         let outcome = simulate_with_backend(
             backend,
             21_000_000,
+            0,
             &op,
             U256::from(100_000_000_000_000_000u128), // 0.1 ETH min profit
             U256::ZERO,
@@ -332,6 +379,7 @@ mod tests {
         let outcome = simulate_with_backend(
             backend,
             21_000_000,
+            0,
             &op,
             U256::from(1_000_000_000_000_000_000u128), // 1 ETH min profit
             U256::ZERO,

@@ -107,9 +107,14 @@ pub async fn compute_mock_hf_overrides(
 
     let overrides: Vec<CodeOverride> = sources
         .iter()
-        .map(|(source, price)| {
+        .map(|(asset, source, price)| {
             let new_price = (price.saturating_mul(U256::from(factor_ppm)) / U256::from(PPM))
                 .max(U256::from(1u8));
+            // Log EVERY asset being overridden so multi-collateral borrowers are
+            // visible (a borrower with WETH+WBTC+cbBTC must show three lines).
+            warn!(
+                "mock-hf override: asset {asset:#x} source {source:#x} price {price} -> {new_price}"
+            );
             CodeOverride {
                 address: *source,
                 code: stub_price_bytecode(new_price),
@@ -279,6 +284,9 @@ pub async fn build_signed_liquidation_tx(
         .get_block_number()
         .await
         .map_err(|e| anyhow!("block number: {e}"))?;
+    // Real block timestamp so revm doesn't run at 0 (Aave interest/price-cap math
+    // underflow-panics at timestamp 0).
+    let block_ts = crate::exec::fetch_block_timestamp(&provider, block).await;
 
     // --mock-hf: fork-only oracle overrides, precomputed by the caller.
     let overrides = inputs.oracle_overrides.clone();
@@ -288,6 +296,7 @@ pub async fn build_signed_liquidation_tx(
     let sim = simulate_raw_call_with_overrides(
         backend,
         block,
+        block_ts,
         overrides,
         from,
         inputs.liquidator,

@@ -41,6 +41,7 @@ pub use build_tx::{
     BuildTxReport, DEFAULT_SWAP_FEE,
 };
 pub use sign::load_signer_from_env;
+pub use simulate::fetch_block_timestamp;
 pub use simulate::simulate_liquidation;
 pub use simulate::simulate_with_backend;
 pub use simulate::{simulate_raw_call, simulate_raw_call_with_overrides, CodeOverride, RawSimulation};

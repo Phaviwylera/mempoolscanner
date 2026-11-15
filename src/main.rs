@@ -124,6 +124,17 @@ async fn main() -> Result<()> {
         return run_build_tx(&target, mock_hf).await;
     }
 
+    // Diagnostic: resolve a borrower's collateral sources, apply the --mock-hf
+    // oracle overrides, and run getUserAccountData THROUGH revm to print the
+    // effective health factor the EVM actually sees. Proves the override works
+    // inside revm (not just in an RPC eth_call). No key or liquidator needed.
+    if let Some(target) = flag_value(&args, "--debug-mock-hf") {
+        let mhf = flag_value(&args, "--mock-hf")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.95);
+        return run_debug_mock_hf(&target, mhf).await;
+    }
+
     let settings = Settings::from_env()?;
 
     // --- Shared state between scanner pipeline and HTTP API server ---
@@ -484,6 +495,122 @@ async fn run_build_tx(target: &str, mock_hf: Option<f64>) -> Result<()> {
     std::fs::write("signed_tx.txt", format!("{}\n", report.raw_tx_hex))?;
     println!("\nWrote signed_tx.txt. Inspect it, then broadcast it yourself (e.g. via Flashbots).");
     println!("This tool never broadcasts.");
+
+    Ok(())
+}
+
+/// Diagnostic for `--debug-mock-hf <address>`: show the mock overrides and the
+/// health factor revm computes with them applied. Read-only; no key, no
+/// liquidator, no broadcast.
+async fn run_debug_mock_hf(target: &str, mock_hf: f64) -> Result<()> {
+    use alloy::primitives::Bytes;
+    use alloy::providers::{Provider, ProviderBuilder};
+    use mempool_scanner::exec::{compute_mock_hf_overrides, simulate_raw_call_with_overrides};
+    use mempool_scanner::keeper::{Keeper, AAVE_V3_POOL};
+    use mempool_scanner::state::{RpcStateBackend, StateBackend};
+    use std::collections::HashMap;
+
+    let user: Address = target
+        .trim()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid address {target:?}: {e}"))?;
+
+    let settings = Settings::from_env()?;
+    let rpc = settings.state_rpc.clone();
+    let recent: Arc<RwLock<HashMap<String, mempool_scanner::exec::LiquidationOpportunity>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+    let keeper = Keeper::new(&rpc, recent).await?;
+
+    let target_wad = U256::from((mock_hf * 1e18).round().max(1.0) as u128);
+
+    println!("── Mock-HF diagnostic for {user:#x} ─────────────────────────");
+    let live_hf = keeper.user_health_factor(user).await;
+    println!(
+        "live health factor : {}",
+        live_hf.map(|h| h.to_string()).unwrap_or_else(|| "unknown".into())
+    );
+    println!("target health factor: {target_wad} ({mock_hf})");
+
+    println!("\nCollateral price sources (asset / source / price):");
+    for (asset, source, price) in keeper.collateral_price_sources(user).await {
+        println!("  {asset:#x}  src {source:#x}  price {price}");
+    }
+
+    let (overrides, note) = compute_mock_hf_overrides(&keeper, user, target_wad).await;
+    println!("\noverrides built     : {} source(s)", overrides.len());
+    if let Some(n) = &note {
+        println!("note                : {n}");
+    }
+
+    // Run getUserAccountData(user) through revm WITH the overrides applied.
+    let provider = ProviderBuilder::new().connect(&rpc).await?.erased();
+    let block = provider.get_block_number().await?;
+    let block_ts = mempool_scanner::exec::fetch_block_timestamp(&provider, block).await;
+    println!("\nforked block        : {block} (timestamp {block_ts})");
+    let backend: Arc<dyn StateBackend> = Arc::new(RpcStateBackend::new(provider));
+
+    // Probe getAssetPrice(asset) through revm for each collateral + USDC/USDT to
+    // find exactly which price adapter panics under the fork.
+    use mempool_scanner::keeper::AAVE_V3_ORACLE;
+    let probe_assets: Vec<(&str, &str)> = vec![
+        ("WETH", "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"),
+        ("WBTC", "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"),
+        ("cbBTC", "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"),
+        ("USDC", "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"),
+    ];
+    println!("\nPer-asset getAssetPrice through revm (no overrides):");
+    for (name, addr) in &probe_assets {
+        let asset: Address = addr.parse().unwrap();
+        let mut d = vec![0xb3, 0x59, 0x6f, 0x07]; // getAssetPrice(address)
+        d.extend_from_slice(&[0u8; 12]);
+        d.extend_from_slice(asset.as_slice());
+        match mempool_scanner::exec::simulate_raw_call_with_overrides(
+            backend.clone(), block, block_ts, Vec::new(), user, AAVE_V3_ORACLE, alloy::primitives::Bytes::from(d), U256::ZERO, 2_000_000,
+        ).await {
+            Ok(s) if s.success => println!("  {name:6} ok   price {}", U256::from_be_slice(&s.output[..32.min(s.output.len())])),
+            Ok(s) => println!("  {name:6} FAIL {}", s.failure.as_deref().unwrap_or("?")),
+            Err(e) => println!("  {name:6} ERR  {e}"),
+        }
+    }
+
+    // getUserAccountData(address) selector 0xbf92857c + 32-byte user arg.
+    let mut data = vec![0xbf, 0x92, 0x85, 0x7c];
+    data.extend_from_slice(&[0u8; 12]);
+    data.extend_from_slice(user.as_slice());
+
+    let sim = simulate_raw_call_with_overrides(
+        backend,
+        block,
+        block_ts,
+        overrides,
+        user,
+        AAVE_V3_POOL,
+        Bytes::from(data),
+        U256::ZERO,
+        3_000_000,
+    )
+    .await?;
+
+    println!("\nrevm getUserAccountData success: {}", sim.success);
+    if sim.success && sim.output.len() >= 192 {
+        let hf_eff = U256::from_be_slice(&sim.output[160..192]);
+        let liq = hf_eff < U256::from(10u128.pow(18));
+        println!("EFFECTIVE HF in revm (with overrides): {hf_eff}");
+        println!(
+            "verdict             : {}",
+            if liq {
+                "HF < 1.0 — override WORKS in revm; liquidation will seize collateral"
+            } else {
+                "HF >= 1.0 — override NOT effective in revm; the price override is not reaching Aave"
+            }
+        );
+    } else {
+        println!(
+            "unexpected: output {} bytes, failure {:?}",
+            sim.output.len(),
+            sim.failure
+        );
+    }
 
     Ok(())
 }

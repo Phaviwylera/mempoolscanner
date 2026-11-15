@@ -811,12 +811,15 @@ async fn post_simulate(
         Err(e) => return sim_error(format!("eth_blockNumber failed: {e}")),
     };
     let gas_price_wei: u128 = provider.get_gas_price().await.unwrap_or(1_000_000_000);
+    // Real block timestamp so revm doesn't run at 0 and underflow-panic Aave.
+    let block_ts = crate::exec::fetch_block_timestamp(&provider, block).await;
 
     let backend: Arc<dyn StateBackend> = Arc::new(RpcStateBackend::new(provider));
 
     let sim = match simulate_raw_call(
         backend,
         block,
+        block_ts,
         from,
         opportunity.to,
         calldata,

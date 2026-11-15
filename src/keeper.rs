@@ -396,12 +396,12 @@ impl Keeper {
             .map(|d| d.health_factor)
     }
 
-    /// For each reserve the borrower uses as collateral, return its Aave oracle
-    /// price source (adapter) address and current 8-decimal price. Used by the
-    /// `--mock-hf` builder to crush every collateral source in the fork, not
-    /// just the one being seized (a borrower with multiple collaterals needs
-    /// all of them dropped for the health factor to fall).
-    pub async fn collateral_price_sources(&self, user: Address) -> Vec<(Address, U256)> {
+    /// For each reserve the borrower uses as collateral, return
+    /// `(asset, oracle_source, current_price_8dec)`. Used by the `--mock-hf`
+    /// builder to crush every collateral source in the fork, not just the one
+    /// being seized (a borrower with multiple collaterals needs all of them
+    /// dropped for the health factor to fall).
+    pub async fn collateral_price_sources(&self, user: Address) -> Vec<(Address, Address, U256)> {
         let reserves = match self.reserves().await {
             Ok(r) => r,
             Err(e) => {
@@ -426,7 +426,7 @@ impl Keeper {
                     if price.is_zero() {
                         return None;
                     }
-                    Some((source, price))
+                    Some((meta.asset, source, price))
                 }
             })
             .buffer_unordered(8)
