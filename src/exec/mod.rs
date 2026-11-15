@@ -30,14 +30,19 @@ use std::str::FromStr;
 use url::Url;
 
 mod broadcast;
+mod build_tx;
 mod sign;
 mod simulate;
 
 pub use broadcast::broadcast_and_confirm;
+pub use build_tx::{
+    build_signed_liquidation_tx, build_tx_from_opportunity, close_factor_debt,
+    encode_execute_liquidation, BuildTxInputs, BuildTxReport, DEFAULT_SWAP_FEE,
+};
 pub use sign::load_signer_from_env;
 pub use simulate::simulate_liquidation;
 pub use simulate::simulate_with_backend;
-pub use simulate::{simulate_raw_call, RawSimulation};
+pub use simulate::{simulate_raw_call, simulate_raw_call_with_overrides, CodeOverride, RawSimulation};
 
 /// A liquidation opportunity detected by the scanner's pattern-match stage.
 #[derive(Clone, Debug, Serialize, Deserialize)]

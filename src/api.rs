@@ -21,7 +21,8 @@ use axum::{
 use chrono::Utc;
 use crate::chainlink::ChainlinkEthUsd;
 use crate::exec::{
-    execute_liquidation, simulate_raw_call, ExecConfig, ExecOutcome, LiquidationOpportunity,
+    build_tx_from_opportunity, execute_liquidation, load_signer_from_env, simulate_raw_call,
+    ExecConfig, ExecOutcome, LiquidationOpportunity, DEFAULT_SWAP_FEE,
 };
 use crate::state::{RpcStateBackend, StateBackend};
 use alloy::primitives::{keccak256, Address, Bytes, U256};
@@ -57,6 +58,8 @@ pub struct AppState {
     pub state_rpc: Option<String>,
     /// Cached Chainlink ETH/USD reader. `None` when no RPC is configured.
     pub eth_usd: Option<Arc<ChainlinkEthUsd>>,
+    /// Cached live USD/INR rate `(rate, fetched_at)`, refreshed from Coinbase.
+    pub usd_inr: Arc<RwLock<Option<(f64, std::time::Instant)>>>,
 }
 
 /// Result of a `/api/execute` call, surfaced to the UI.
@@ -90,6 +93,7 @@ impl AppState {
             last_exec: Arc::new(RwLock::new(None)),
             state_rpc: None,
             eth_usd: None,
+            usd_inr: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -104,6 +108,7 @@ impl AppState {
             last_exec: Arc::new(RwLock::new(None)),
             state_rpc: None,
             eth_usd: None,
+            usd_inr: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -132,6 +137,73 @@ impl AppState {
                 guard.remove(&k);
             }
         }
+    }
+
+    /// Live USD/INR rate, returned as `(rate, source)`.
+    ///
+    /// Fetched from Coinbase's public exchange-rates endpoint and cached for
+    /// 10 minutes — the dashboard polls every 5s, so without a cache this would
+    /// hammer the upstream. On any failure it serves the last good value, or the
+    /// documented fallback, and labels the source so the UI never presents a
+    /// fallback as a live quote. This is a read-only price fetch: nothing here
+    /// signs or broadcasts.
+    pub async fn usd_inr_rate(&self) -> (f64, &'static str) {
+        const TTL: std::time::Duration = std::time::Duration::from_secs(600);
+        const FALLBACK: f64 = 86.0;
+
+        if let Some((rate, fetched)) = *self.usd_inr.read().await {
+            if fetched.elapsed() < TTL {
+                return (rate, "coinbase");
+            }
+        }
+
+        match fetch_usd_inr_coinbase().await {
+            Ok(rate) => {
+                *self.usd_inr.write().await = Some((rate, std::time::Instant::now()));
+                (rate, "coinbase")
+            }
+            Err(e) => {
+                warn!("USD/INR fetch failed: {e}");
+                // Serve the last good value if we have one, else the fallback.
+                match *self.usd_inr.read().await {
+                    Some((rate, _)) => (rate, "coinbase (stale)"),
+                    None => (FALLBACK, "fallback"),
+                }
+            }
+        }
+    }
+}
+
+/// Uncached GET of Coinbase's USD exchange rates; returns the INR rate.
+async fn fetch_usd_inr_coinbase() -> anyhow::Result<f64> {
+    let url = "https://api.coinbase.com/v2/exchange-rates?currency=USD";
+    // use_rustls_tls() binds to the process-default ring provider installed in
+    // main.rs, matching the rest of the TLS stack.
+    let client = reqwest::Client::builder()
+        .use_rustls_tls()
+        .build()?;
+    let resp = client
+        .get(url)
+        .header("accept", "application/json")
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await?;
+
+    let inr = resp
+        .get("data")
+        .and_then(|d| d.get("rates"))
+        .and_then(|r| r.get("INR"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("INR rate missing from Coinbase response"))?
+        .parse::<f64>()?;
+
+    if inr.is_finite() && inr > 0.0 {
+        Ok(inr)
+    } else {
+        Err(anyhow::anyhow!("implausible USD/INR rate: {inr}"))
     }
 }
 
@@ -166,6 +238,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/execute", post(post_execute))
         // axum 0.8 path params are {braces}; ":address" would panic at startup.
         .route("/api/simulate/{address}", post(post_simulate))
+        .route("/api/build-tx/{address}", get(get_build_tx))
         .route("/api/keepers", get(get_keepers))
         .route("/api/audit-logs", get(get_audit_logs))
         .route("/api/audit-logs/download", get(download_audit_logs))
@@ -328,8 +401,10 @@ async fn get_liquidations(
     // Live Chainlink ETH/USD when a feed is configured and reachable; the old
     // hardcoded reference value only as a last resort, and labelled as such so
     // the UI never presents a made-up price as an oracle reading.
-    const USD_INR: f64 = 86.0;
     const REFERENCE_ETH_USD: f64 = 2650.0;
+
+    // Live USD/INR from Coinbase (cached), replacing the old hardcoded 86.0.
+    let (usd_inr, fx_inr_source) = state.usd_inr_rate().await;
 
     let quote = match &state.eth_usd {
         Some(feed) => feed.quote().await,
@@ -349,9 +424,10 @@ async fn get_liquidations(
         "positions": positions,
         "summary": summary,
         "fx": {
-            "eth_inr": eth_usd * USD_INR,
+            "eth_inr": eth_usd * usd_inr,
             "eth_usd": eth_usd,
-            "usd_inr": USD_INR,
+            "usd_inr": usd_inr,
+            "usd_inr_source": fx_inr_source,
             "source": fx_source,
             "stale": fx_stale,
             "feed_updated_at": feed_updated_at,
@@ -809,6 +885,114 @@ async fn post_simulate(
         "simulated_from": format!("{from:#x}"),
         "broadcast": false,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/build-tx/{address} — manual offline transaction builder
+// ---------------------------------------------------------------------------
+
+/// GET /api/build-tx/{address}
+///
+/// Resolves the borrower's opportunity, runs the revm pre-flight, signs ONE
+/// transaction targeting the AaveV3Liquidator contract, and returns the raw
+/// signed hex for the operator to inspect and broadcast themselves. It never
+/// broadcasts.
+///
+/// Signing needs key material: `EXEC_PRIVATE_KEY` (or keystore) plus
+/// `EXEC_LIQUIDATOR_ADDRESS` and a state RPC. This is independent of
+/// `EXECUTION_MODE` — the builder is an offline utility, not the autonomous
+/// path.
+async fn get_build_tx(
+    State(state): State<Arc<AppState>>,
+    Path(address): Path<String>,
+) -> Json<Value> {
+    let user: Address = match address.trim().parse() {
+        Ok(a) => a,
+        Err(e) => return Json(json!({ "success": false, "error": format!("invalid address {address:?}: {e}") })),
+    };
+
+    // Locate the opportunity (by borrower first, then by id) — same as simulate.
+    let opportunity = {
+        let guard = state.recent_opportunities.read().await;
+        guard
+            .values()
+            .find(|o| o.borrower == Some(user))
+            .or_else(|| guard.values().find(|o| o.id.eq_ignore_ascii_case(address.trim())))
+            .cloned()
+    };
+    let Some(opportunity) = opportunity else {
+        return Json(json!({ "success": false, "error": "no opportunity found for address" }));
+    };
+
+    let Some(rpc_url) = state.state_rpc.clone() else {
+        return Json(json!({
+            "success": false,
+            "error": "no state RPC configured; build-tx needs HTTP_RPC/WS_RPC for nonce, gas, and the pre-flight",
+        }));
+    };
+
+    let liquidator: Address = match std::env::var("EXEC_LIQUIDATOR_ADDRESS")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+    {
+        Some(v) => match v.trim().parse() {
+            Ok(a) => a,
+            Err(e) => return Json(json!({ "success": false, "error": format!("invalid EXEC_LIQUIDATOR_ADDRESS: {e}") })),
+        },
+        None => {
+            return Json(json!({
+                "success": false,
+                "error": "build-tx requires EXEC_LIQUIDATOR_ADDRESS (the deployed AaveV3Liquidator contract)",
+            }))
+        }
+    };
+
+    let signer = match load_signer_from_env() {
+        Ok(s) => s,
+        Err(e) => {
+            return Json(json!({
+                "success": false,
+                "error": format!("no signer available: set EXEC_PRIVATE_KEY or EXEC_KEYSTORE_PATH ({e})"),
+            }))
+        }
+    };
+
+    let chain_id: u64 = std::env::var("EXEC_CHAIN_ID")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(1);
+    let swap_fee: u32 = std::env::var("BUILD_TX_SWAP_FEE")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DEFAULT_SWAP_FEE);
+    let min_profit: U256 = std::env::var("BUILD_TX_MIN_PROFIT")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(U256::ZERO);
+    let gas_limit: u64 = std::env::var("BUILD_TX_GAS_LIMIT")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(380_000);
+
+    // health_factor_wad = None → the builder applies the conservative 50%
+    // close-factor cap. The CLI (`--build-tx`) reads the live HF for an exact cap.
+    match build_tx_from_opportunity(
+        &signer, &rpc_url, chain_id, liquidator, &opportunity, None, swap_fee, min_profit, gas_limit,
+    )
+    .await
+    {
+        Ok(report) => {
+            let mut v = json!(report);
+            v["success"] = json!(true);
+            v["opportunity_id"] = json!(opportunity.id);
+            Json(v)
+        }
+        Err(e) => Json(json!({
+            "success": false,
+            "error": e.to_string(),
+            "opportunity_id": opportunity.id,
+        })),
+    }
 }
 
 /// Start the HTTP API server on the given address.

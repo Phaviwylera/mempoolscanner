@@ -3,6 +3,8 @@ bin/
 venv/
 .env
 logs/
+# Manual tx builder output — a signed raw transaction; never commit it.
+signed_tx.txt
 __pycache__/
 *.py[cod]
 

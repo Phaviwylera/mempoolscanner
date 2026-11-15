@@ -12,10 +12,12 @@ use crate::state::{BlockSnapshot, PinnedStateView, RpcStateBackend, StateBackend
 use alloy::primitives::{Address, Bytes, B256, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use anyhow::{anyhow, Result};
+use revm::bytecode::Bytecode;
 use revm::context::TxEnv;
 use revm::context_interface::block::BlobExcessGasAndPrice;
 use revm::context_interface::result::ExecutionResult;
 use revm::database::CacheDB;
+use revm::state::AccountInfo;
 use revm::primitives::eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_PRAGUE;
 use revm::primitives::{hardfork::SpecId, TxKind};
 use revm::{AsyncDb, Context, ExecuteEvm, MainBuilder, MainContext};
@@ -110,6 +112,16 @@ pub struct RawSimulation {
     pub logs: Vec<(Address, Vec<B256>, Bytes)>,
 }
 
+/// A fork-only override that replaces one account's bytecode for the duration
+/// of a single simulation. Used by the manual tx builder's `--mock-hf` path to
+/// swap an Aave oracle price source for a stub returning a chosen price, so a
+/// position's health factor computes below 1.0 without touching real state.
+#[derive(Clone, Debug)]
+pub struct CodeOverride {
+    pub address: Address,
+    pub code: Bytes,
+}
+
 /// Execute an arbitrary call in `revm` against forked state at `block`.
 ///
 /// Read-only: the EVM runs in-process against a `CacheDB` over the state
@@ -117,6 +129,24 @@ pub struct RawSimulation {
 pub async fn simulate_raw_call(
     backend: Arc<dyn StateBackend>,
     block: u64,
+    from: Address,
+    to: Address,
+    calldata: Bytes,
+    value: U256,
+    gas_limit: u64,
+) -> Result<RawSimulation> {
+    simulate_raw_call_with_overrides(backend, block, Vec::new(), from, to, calldata, value, gas_limit)
+        .await
+}
+
+/// Like [`simulate_raw_call`], but with fork-only account bytecode overrides
+/// applied before execution. The overrides live only in this `CacheDB`; real
+/// state and the signed transaction are untouched.
+#[allow(clippy::too_many_arguments)]
+pub async fn simulate_raw_call_with_overrides(
+    backend: Arc<dyn StateBackend>,
+    block: u64,
+    overrides: Vec<CodeOverride>,
     from: Address,
     to: Address,
     calldata: Bytes,
@@ -134,6 +164,22 @@ pub async fn simulate_raw_call(
             block,
         };
         let mut cache_db = CacheDB::new(AsyncDb::with_handle(view, handle));
+
+        // Apply fork-only bytecode overrides (e.g. a stubbed oracle source).
+        for ov in &overrides {
+            let bc = Bytecode::new_raw(ov.code.clone());
+            let code_hash = bc.hash_slow();
+            cache_db.insert_account_info(
+                ov.address,
+                AccountInfo {
+                    balance: U256::ZERO,
+                    nonce: 1,
+                    code_hash,
+                    code: Some(bc),
+                    ..Default::default()
+                },
+            );
+        }
         let mut evm = Context::mainnet()
             .with_db(&mut cache_db)
             .modify_cfg_chained(|cfg| {

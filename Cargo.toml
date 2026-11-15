@@ -60,6 +60,10 @@ url = "2.5"
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 alloy-rpc-types-mev = "2.5"
 bytes = "1.0"
+# Live USD/INR fetch (Coinbase). `rustls-no-provider` keeps TLS on rustls and
+# reuses the process-wide ring CryptoProvider that main.rs installs at startup —
+# no aws-lc-rs C build, no duplicate provider, no OpenSSL. `json` for the body.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json"] }
 
 # HTTP API server for the execution UI
 axum = "0.8"

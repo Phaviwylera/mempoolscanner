@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { ArrowDownWideNarrow, LoaderCircle, FlaskConical } from "lucide-react";
+import { ArrowDownWideNarrow, LoaderCircle, FlaskConical, FileSignature } from "lucide-react";
 import {
   BAND_BAR,
   BAND_TEXT,
@@ -52,6 +52,8 @@ export default function PositionsTable({
   onSelect,
   onSimulate,
   simulatingUser,
+  onBuildTx,
+  buildingUser,
 }: {
   rows: Row[];
   selected: string | null;
@@ -59,6 +61,10 @@ export default function PositionsTable({
   onSimulate: (user: string) => void;
   /** Address currently being simulated, for the per-row spinner. */
   simulatingUser: string | null;
+  /** Open the manual tx builder for a borrower. */
+  onBuildTx: (user: string) => void;
+  /** Address currently having a payload built, for the per-row spinner. */
+  buildingUser: string | null;
 }) {
   // Sort by highest bounty, per spec. Keeper wei bounty (exact, BigInt) ranks
   // above the snapshot's USD estimate; ties fall back to lowest health factor.
@@ -99,7 +105,7 @@ export default function PositionsTable({
               <th className="px-3 py-2 text-right font-normal">Liq. Thr.</th>
               <th className="px-3 py-2 text-right font-normal">Est. Flash Bounty</th>
               <th className="px-3 py-2 font-normal">Status</th>
-              <th className="px-3 py-2 text-right font-normal">Simulate</th>
+              <th className="px-3 py-2 text-right font-normal">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -114,6 +120,7 @@ export default function PositionsTable({
             {sorted.map((r) => {
               const isSel = selected !== null && selected === r.user;
               const busy = simulatingUser === r.user;
+              const building = buildingUser === r.user;
               return (
                 <tr
                   key={r.user}
@@ -158,24 +165,42 @@ export default function PositionsTable({
                   <td className="px-3 py-2">
                     <StatusPill row={r} />
                   </td>
-                  <td className="px-3 py-2 text-right">
-                    <button
-                      onClick={(e) => {
-                        // Do not let the click also re-trigger row selection.
-                        e.stopPropagation();
-                        onSimulate(r.user);
-                      }}
-                      disabled={busy}
-                      title="Run a revm fork simulation for this borrower"
-                      className="inline-flex items-center gap-1 rounded border border-edge bg-edge/40 px-2 py-1 text-[10px] text-ink transition-colors hover:bg-edge disabled:opacity-50"
-                    >
-                      {busy ? (
-                        <LoaderCircle size={11} className="animate-spin" />
-                      ) : (
-                        <FlaskConical size={11} />
-                      )}
-                      {busy ? "Simulating" : "Simulate"}
-                    </button>
+                  <td className="px-3 py-2">
+                    <div className="flex items-center justify-end gap-1.5">
+                      <button
+                        onClick={(e) => {
+                          // Do not let the click also re-trigger row selection.
+                          e.stopPropagation();
+                          onSimulate(r.user);
+                        }}
+                        disabled={busy}
+                        title="Run a revm fork simulation for this borrower"
+                        className="inline-flex items-center gap-1 rounded border border-edge bg-edge/40 px-2 py-1 text-[10px] text-ink transition-colors hover:bg-edge disabled:opacity-50"
+                      >
+                        {busy ? (
+                          <LoaderCircle size={11} className="animate-spin" />
+                        ) : (
+                          <FlaskConical size={11} />
+                        )}
+                        {busy ? "Simulating" : "Simulate"}
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onBuildTx(r.user);
+                        }}
+                        disabled={building}
+                        title="Build & sign a liquidation payload offline (not broadcast)"
+                        className="inline-flex items-center gap-1 rounded border border-edge bg-edge/40 px-2 py-1 text-[10px] text-ink transition-colors hover:bg-edge disabled:opacity-50"
+                      >
+                        {building ? (
+                          <LoaderCircle size={11} className="animate-spin" />
+                        ) : (
+                          <FileSignature size={11} />
+                        )}
+                        {building ? "Building" : "Generate Payload"}
+                      </button>
+                    </div>
                   </td>
                 </tr>
               );

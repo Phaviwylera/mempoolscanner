@@ -3075,6 +3075,7 @@ dependencies = [
  "dotenvy",
  "futures-util",
  "hex",
+ "reqwest",
  "revm",
  "rustls",
  "serde",

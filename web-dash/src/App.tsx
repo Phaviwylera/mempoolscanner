@@ -6,11 +6,14 @@ import PositionsTable from "./components/PositionsTable";
 import CheckWallet from "./components/CheckWallet";
 import EnginePanel from "./components/EnginePanel";
 import RecentLiquidations from "./components/RecentLiquidations";
+import PayloadModal from "./components/PayloadModal";
 import {
+  buildTx,
   fetchLiquidations,
   fetchOpportunities,
   joinRows,
   simulate,
+  type BuildTxResult,
   type LiquidationsResponse,
   type OpportunitiesResponse,
   type Row,
@@ -30,6 +33,11 @@ export default function App() {
   const [sims, setSims] = useState<Record<string, SimulationResult>>({});
   const [simulatingUser, setSimulatingUser] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+
+  // Manual tx builder modal.
+  const [buildingUser, setBuildingUser] = useState<string | null>(null);
+  const [payloadFor, setPayloadFor] = useState<string | null>(null);
+  const [payload, setPayload] = useState<BuildTxResult | null>(null);
 
   // Keeps the poll from stacking requests if the backend is slow.
   const inFlight = useRef(false);
@@ -81,6 +89,26 @@ export default function App() {
       setToast(msg);
     } finally {
       setSimulatingUser(null);
+    }
+  }, []);
+
+  const onBuildTx = useCallback(async (user: string) => {
+    setSelected(user);
+    setPayloadFor(user);
+    setPayload(null);
+    setBuildingUser(user);
+    try {
+      const result = await buildTx(user);
+      setPayload(result);
+      if (!result.success) {
+        setToast(result.error ?? "Failed to build payload.");
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setPayload({ success: false, error: msg });
+      setToast(msg);
+    } finally {
+      setBuildingUser(null);
     }
   }, []);
 
@@ -154,6 +182,8 @@ export default function App() {
             onSelect={setSelected}
             onSimulate={(u) => void onSimulate(u)}
             simulatingUser={simulatingUser}
+            onBuildTx={(u) => void onBuildTx(u)}
+            buildingUser={buildingUser}
           />
         </div>
 
@@ -163,6 +193,18 @@ export default function App() {
           <RecentLiquidations items={liq?.recent_liquidations ?? []} />
         </div>
       </div>
+
+      {payloadFor ? (
+        <PayloadModal
+          user={payloadFor}
+          result={payload}
+          loading={buildingUser === payloadFor}
+          onClose={() => {
+            setPayloadFor(null);
+            setPayload(null);
+          }}
+        />
+      ) : null}
 
       {toast ? (
         <div className="fixed bottom-4 right-4 z-50 flex max-w-md items-start gap-2 rounded-lg border border-risk/50 bg-card px-4 py-3 text-[11px] text-risk shadow-lg">

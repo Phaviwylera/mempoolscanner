@@ -33,6 +33,21 @@ fn flag(args: &[String], name: &str) -> bool {
     args.iter().any(|a| a == name)
 }
 
+/// Value following a `--flag <value>` (or `--flag=value`) argument, if present.
+fn flag_value(args: &[String], name: &str) -> Option<String> {
+    let eq_prefix = format!("{name}=");
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == name {
+            return it.next().cloned();
+        }
+        if let Some(v) = a.strip_prefix(&eq_prefix) {
+            return Some(v.to_string());
+        }
+    }
+    None
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -86,6 +101,28 @@ async fn main() -> Result<()> {
         .with_target(false)
         .compact()
         .init();
+
+    // --- Manual offline transaction builder -------------------------------
+    //
+    // `--build-tx <address>` is a one-shot utility: it resolves the borrower's
+    // liquidation opportunity, runs the revm profitability pre-flight, signs a
+    // single transaction targeting the AaveV3Liquidator contract, writes the
+    // raw hex to signed_tx.txt, prints it, and EXITS. It never starts the
+    // server, never broadcasts, and never loops.
+    if let Some(target) = flag_value(&args, "--build-tx") {
+        // Optional --mock-hf <value>: fork-only HF override for testing. Present
+        // without a parseable value defaults to 0.95.
+        let mock_hf = if flag(&args, "--mock-hf") {
+            Some(
+                flag_value(&args, "--mock-hf")
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.95),
+            )
+        } else {
+            None
+        };
+        return run_build_tx(&target, mock_hf).await;
+    }
 
     let settings = Settings::from_env()?;
 
@@ -282,6 +319,162 @@ async fn main() -> Result<()> {
         handle.abort();
         let _ = handle.await;
     }
+
+    Ok(())
+}
+
+/// Handle `--build-tx <address>`: resolve the opportunity, simulate, sign, and
+/// write the signed raw transaction hex. Never broadcasts. `mock_hf`, when set,
+/// overrides the borrower's health factor in the pre-flight only (testing).
+async fn run_build_tx(target: &str, mock_hf: Option<f64>) -> Result<()> {
+    use mempool_scanner::exec::{build_signed_liquidation_tx, BuildTxInputs, DEFAULT_SWAP_FEE};
+    use mempool_scanner::exec::close_factor_debt;
+    use mempool_scanner::keeper::Keeper;
+    use std::collections::HashMap;
+
+    let user: Address = target
+        .trim()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid --build-tx address {target:?}: {e}"))?;
+
+    // Signer is env-only (EXEC_PRIVATE_KEY / keystore), exactly as the execution
+    // path. This utility signs offline; it does not need EXECUTION_MODE enabled.
+    let signer = load_signer_from_env()?;
+
+    let liquidator: Address = env::var("EXEC_LIQUIDATOR_ADDRESS")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "--build-tx requires EXEC_LIQUIDATOR_ADDRESS (the deployed AaveV3Liquidator contract)"
+            )
+        })?
+        .trim()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid EXEC_LIQUIDATOR_ADDRESS: {e}"))?;
+
+    let chain_id: u64 = env::var("EXEC_CHAIN_ID")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(1);
+    let swap_fee: u32 = env::var("BUILD_TX_SWAP_FEE")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DEFAULT_SWAP_FEE);
+    let min_profit: U256 = env::var("BUILD_TX_MIN_PROFIT")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(U256::ZERO);
+    let gas_limit: u64 = env::var("BUILD_TX_GAS_LIMIT")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(380_000);
+
+    let settings = Settings::from_env()?;
+    let rpc_url = settings.state_rpc.clone();
+
+    info!("Resolving opportunity for {user:#x} via Aave data provider…");
+    let recent: Arc<RwLock<HashMap<String, mempool_scanner::exec::LiquidationOpportunity>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+    let keeper = Keeper::new(&rpc_url, recent).await?;
+
+    let selection = keeper.resolve_reserves(user).await;
+    let (Some(collateral), Some(debt_asset)) = (selection.collateral, selection.debt_asset) else {
+        anyhow::bail!(
+            "could not resolve a collateral+debt pair for {user:#x}. The borrower may have no \
+             open Aave V3 position, or the data provider was unreachable."
+        );
+    };
+    if selection.debt_amount.is_zero() {
+        anyhow::bail!("resolved zero debt for {user:#x}; nothing to liquidate");
+    }
+
+    // Convert an optional --mock-hf float to a 1e18-scaled target.
+    let mock_hf_wad: Option<U256> =
+        mock_hf.map(|v| U256::from((v * 1e18).round().max(1.0) as u128));
+
+    // Apply the Aave close factor. When mocking, size against the mock HF so the
+    // close factor matches the position the pre-flight will simulate.
+    let hf = keeper.user_health_factor(user).await;
+    let effective_hf = mock_hf_wad.or(hf);
+    let debt_to_cover = match effective_hf {
+        Some(h) => close_factor_debt(selection.debt_amount, h),
+        None => selection.debt_amount / U256::from(2u8),
+    };
+
+    println!("\n── Opportunity ──────────────────────────────────────────────");
+    println!("borrower        {user:#x}");
+    println!(
+        "health factor   {}",
+        hf.map(|h| h.to_string()).unwrap_or_else(|| "unknown".into())
+    );
+    println!(
+        "collateral      {collateral:#x}  ({})",
+        selection.collateral_symbol.as_deref().unwrap_or("?")
+    );
+    println!(
+        "debt asset      {debt_asset:#x}  ({})",
+        selection.debt_symbol.as_deref().unwrap_or("?")
+    );
+    println!("total debt      {} (asset units)", selection.debt_amount);
+    println!("debtToCover     {debt_to_cover} (after close factor)");
+    println!("liquidator      {liquidator:#x}");
+    println!("swapFee         {swap_fee}");
+    println!("minProfit       {min_profit}");
+    if let Some(v) = mock_hf {
+        println!("mock HF         {v} (pre-flight override, TESTING — signed tx unaffected)");
+    }
+
+    let inputs = BuildTxInputs {
+        rpc_url,
+        chain_id,
+        liquidator,
+        user,
+        collateral,
+        debt_asset,
+        debt_to_cover,
+        swap_fee,
+        min_profit,
+        gas_limit,
+        mock_hf_wad,
+    };
+
+    info!("Running revm pre-flight and signing (offline, no broadcast)…");
+    let report = build_signed_liquidation_tx(&signer, &inputs).await?;
+
+    println!("\n── Simulation ───────────────────────────────────────────────");
+    if let Some(note) = &report.mock_hf_note {
+        println!("mock HF         {note}");
+    }
+    println!("revm success    {}", report.simulated_ok);
+    println!("gas used        {}", report.sim_gas_used);
+    if let Some(reason) = &report.sim_revert_reason {
+        println!("revert reason   {reason}");
+    }
+
+    println!("\n── Signed transaction (NOT broadcast) ───────────────────────");
+    println!("from            {}", report.from);
+    println!("to              {}", report.to);
+    println!("nonce           {}", report.nonce);
+    println!("chainId         {}", report.chain_id);
+    println!("gasLimit        {}", report.gas_limit);
+    println!("maxFeePerGas    {}", report.max_fee_per_gas);
+    println!("maxPriorityFee  {}", report.max_priority_fee_per_gas);
+    println!("txHash          {}", report.tx_hash);
+    println!("\nraw signed tx hex:\n{}", report.raw_tx_hex);
+
+    if !report.simulated_ok {
+        eprintln!(
+            "\nWARNING: the revm pre-flight did NOT succeed, so signed_tx.txt was NOT written. \
+             The transaction above would likely revert as built (wrong executor key, below the \
+             close factor, or an unprofitable swap). Inspect the revert reason before broadcasting."
+        );
+        std::process::exit(1);
+    }
+
+    std::fs::write("signed_tx.txt", format!("{}\n", report.raw_tx_hex))?;
+    println!("\nWrote signed_tx.txt. Inspect it, then broadcast it yourself (e.g. via Flashbots).");
+    println!("This tool never broadcasts.");
 
     Ok(())
 }

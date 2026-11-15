@@ -201,6 +201,58 @@ export async function simulate(
   return (await res.json()) as SimulationResult;
 }
 
+/** Response from GET /api/build-tx/:address — the manual tx builder. */
+export interface BuildTxResult {
+  success: boolean;
+  error?: string;
+  opportunity_id?: string;
+  /** 0x-prefixed EIP-2718 signed transaction, ready to broadcast. */
+  raw_tx_hex?: string;
+  tx_hash?: string;
+  from?: string;
+  to?: string;
+  nonce?: number;
+  chain_id?: number;
+  gas_limit?: number;
+  max_fee_per_gas?: string;
+  max_priority_fee_per_gas?: string;
+  calldata?: string;
+  user?: string;
+  collateral_asset?: string;
+  debt_asset?: string;
+  debt_to_cover?: string;
+  swap_fee?: number;
+  min_profit?: string;
+  /** revm pre-flight result; false means it would revert as built. */
+  simulated_ok?: boolean;
+  sim_gas_used?: number;
+  sim_revert_reason?: string | null;
+  /** Set only when a fork-only --mock-hf override was applied (CLI testing). */
+  mock_hf_note?: string | null;
+  /** Always false — the builder never broadcasts. */
+  broadcast?: boolean;
+}
+
+/**
+ * GET /api/build-tx/:address — builds and signs a liquidation transaction
+ * OFFLINE. Returns the raw signed hex for the operator to inspect and
+ * broadcast themselves. Never throws on a handled failure: the backend answers
+ * 200 with success:false and an error string.
+ */
+export async function buildTx(
+  address: string,
+  signal?: AbortSignal,
+): Promise<BuildTxResult> {
+  const res = await fetch(`${API_BASE}/api/build-tx/${address}`, {
+    signal,
+    headers: { accept: "application/json" },
+  });
+  if (!res.ok) {
+    return { success: false, error: `HTTP ${res.status} ${res.statusText}` };
+  }
+  return (await res.json()) as BuildTxResult;
+}
+
 /**
  * Joined view: a position plus the keeper's live wei bounty for that borrower,
  * when the keeper has one. The two endpoints are keyed differently

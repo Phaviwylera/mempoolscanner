@@ -138,3 +138,60 @@ capital. It is **off by default** and introduces no keys, signing, or broadcasti
 - `tests/exec_sepolia.rs` — `#[ignore]` integration test; runs only when `SEPOLIA_RPC_URL` is set,
   asserts the target is Sepolia (never mainnet), and that the gate rejects an unprofitable
   opportunity.
+
+## Manual transaction builder (offline, never broadcasts)
+
+A separate utility from the autonomous execution path: it builds and **signs** one
+liquidation transaction targeting the deployed `AaveV3Liquidator` contract, writes the raw
+hex to `signed_tx.txt`, prints it, and **exits**. It never broadcasts — the operator inspects
+the payload and broadcasts it themselves (e.g. via Flashbots). It is independent of
+`EXECUTION_MODE`.
+
+What it does, in order: resolve the borrower's largest collateral + debt reserve (Aave data
+provider), apply the Aave close factor to size `debtToCover`, run the `revm` pre-flight, sign
+an EIP-1559 transaction, and emit the raw hex. Nothing touches the network beyond read-only
+RPC (nonce, gas, pre-flight).
+
+### CLI
+
+```bash
+EXEC_PRIVATE_KEY=0x…           # signer (env only; never a flag)
+EXEC_LIQUIDATOR_ADDRESS=0x…    # the deployed AaveV3Liquidator
+HTTP_RPC=https://…             # state RPC (nonce, gas, pre-flight)
+mempool-scanner --build-tx 0xBorrowerAddress
+```
+
+If the `revm` pre-flight does not succeed (wrong executor key, below the close factor, or an
+unprofitable swap) the signed hex is still printed, but `signed_tx.txt` is **not** written and
+the process exits non-zero.
+
+#### `--mock-hf <value>` (testing only)
+
+When no mainnet position is below HF 1.0, you can still exercise the full execution path:
+
+```bash
+mempool-scanner --build-tx 0xBorrowerAddress --mock-hf 0.95
+```
+
+This lowers the borrower's **collateral oracle price in the revm fork** (never on-chain) so
+Aave computes a health factor near the target and `liquidationCall` proceeds. It is a
+**simulation-only** override: the signed transaction is byte-identical with or without it, and
+the signed tx carries no override — when the real position later drops below 1.0 the same
+calldata executes. The resulting pre-flight may show inflated profit (it opens a gap between
+the mocked oracle price and the real DEX price), so treat it as proof the *path executes*, not
+as a profit figure. The liquidator contract must be deployed at `EXEC_LIQUIDATOR_ADDRESS` on
+the target chain for the pre-flight to be meaningful.
+
+### HTTP
+
+`GET /api/build-tx/{address}` returns the same payload as JSON (`raw_tx_hex`, `tx_hash`,
+decoded fields, and the pre-flight verdict), for the dashboard's **Generate Payload** button.
+Requires `EXEC_LIQUIDATOR_ADDRESS`, a signer in the environment, and a state RPC. It always
+reports `broadcast: false`.
+
+| Variable | Required | Effect |
+| --- | --- | --- |
+| `EXEC_LIQUIDATOR_ADDRESS` | yes | The deployed `AaveV3Liquidator` (the only call target). |
+| `BUILD_TX_SWAP_FEE` | no (default `3000`) | Uniswap V3 fee tier for the collateral→debt swap. |
+| `BUILD_TX_MIN_PROFIT` | no (default `0`) | `minProfit` in debt-asset units; the contract reverts below it. |
+| `BUILD_TX_GAS_LIMIT` | no (default `380000`) | Gas limit for the flash-loan liquidation. |
