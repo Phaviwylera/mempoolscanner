@@ -100,17 +100,6 @@ pub async fn compute_mock_hf_overrides(
         );
     }
 
-    let sources = keeper.collateral_price_sources(user).await;
-    if sources.is_empty() {
-        return (
-            Vec::new(),
-            Some("--mock-hf: no collateral price sources resolved; no override applied".into()),
-        );
-    }
-    for (asset, source, price) in &sources {
-        warn!("mock-hf collateral: asset {asset:#x} source {source:#x} live price {price}");
-    }
-
     // Build a verification backend on the same RPC the pre-flight uses.
     let verify = async {
         let provider = ProviderBuilder::new().connect(rpc_url).await.ok()?.erased();
@@ -125,27 +114,51 @@ pub async fn compute_mock_hf_overrides(
     let ratio_ppm = (target_hf_wad.saturating_mul(U256::from(PPM)) / current_hf.max(U256::from(1u8)))
         .to::<u128>()
         .min(PPM);
-    // Start at (target/current)^2 and crush harder each round until the SIMULATED
-    // HF is below target. Multiplying by 0.55 per round converges fast.
-    let mut factor_ppm = (ratio_ppm.saturating_mul(ratio_ppm) / PPM).clamp(500, 950_000);
-
-    let build = |factor_ppm: u128| -> Vec<CodeOverride> {
-        sources
-            .iter()
-            .map(|(_, source, price)| CodeOverride {
-                address: *source,
-                code: stub_price_bytecode(
-                    (price.saturating_mul(U256::from(factor_ppm)) / U256::from(PPM))
-                        .max(U256::from(1u8)),
-                ),
-            })
-            .collect()
-    };
-
     let data = encode_get_user_account_data(user);
-    let mut last = build(factor_ppm);
+    let mut last: Vec<CodeOverride> = Vec::new();
 
-    if let Some((backend, block, ts)) = verify {
+    // Up to 2 scan attempts: if crushing every discovered collateral to ~0 still
+    // can't get HF below target, a collateral was MISSED (flaky RPC) — re-scan.
+    for scan_attempt in 0..2u32 {
+        let sources = keeper.collateral_price_sources(user).await;
+        if sources.is_empty() {
+            warn!("mock-hf scan {}: no collateral sources resolved", scan_attempt + 1);
+            continue;
+        }
+        if scan_attempt == 0 {
+            for (asset, source, price) in &sources {
+                warn!("mock-hf collateral: asset {asset:#x} source {source:#x} live price {price}");
+            }
+        }
+
+        let build = |factor_ppm: u128| -> Vec<CodeOverride> {
+            sources
+                .iter()
+                .map(|(_, source, price)| CodeOverride {
+                    address: *source,
+                    code: stub_price_bytecode(
+                        (price.saturating_mul(U256::from(factor_ppm)) / U256::from(PPM))
+                            .max(U256::from(1u8)),
+                    ),
+                })
+                .collect()
+        };
+
+        // Start at (target/current)^2 and crush harder each round until the
+        // SIMULATED HF is below target (×0.55 per round converges fast).
+        let mut factor_ppm = (ratio_ppm.saturating_mul(ratio_ppm) / PPM).clamp(500, 950_000);
+        last = build(factor_ppm);
+
+        let Some((backend, block, ts)) = verify.clone() else {
+            // No verification backend; return the first-guess override unverified.
+            let note = format!(
+                "--mock-hf: {} collateral source(s) crushed to {}.{:02}% (UNVERIFIED — could not build a sim backend).",
+                last.len(), factor_ppm / 10_000, (factor_ppm % 10_000) / 100,
+            );
+            warn!("{note}");
+            return (last, Some(note));
+        };
+
         for round in 0..6u32 {
             let ovs = build(factor_ppm);
             match simulate_raw_call_with_overrides(
@@ -157,27 +170,27 @@ pub async fn compute_mock_hf_overrides(
                     let hf = U256::from_be_slice(&sim.output[160..192]);
                     if hf < target_hf_wad {
                         let note = format!(
-                            "pre-flight: {} collateral source(s) crushed to {}.{:02}% of live price → simulated HF {hf} (< target {target_hf_wad}) after {} round(s). Signed tx unaffected.",
-                            ovs.len(), factor_ppm / 10_000, (factor_ppm % 10_000) / 100, round + 1,
+                            "pre-flight: {} collateral source(s) crushed to {}.{:02}% of live price → simulated HF {hf} (< target {target_hf_wad}) [scan {}, round {}]. Signed tx unaffected.",
+                            ovs.len(), factor_ppm / 10_000, (factor_ppm % 10_000) / 100, scan_attempt + 1, round + 1,
                         );
                         warn!("{note}");
                         return (ovs, Some(note));
                     }
-                    warn!("mock-hf round {}: crush {factor_ppm}ppm gave HF {hf} (>= target); crushing harder", round + 1);
+                    warn!("mock-hf scan {} round {}: crush {factor_ppm}ppm gave HF {hf} (>= target); crushing harder", scan_attempt + 1, round + 1);
                 }
                 other => {
-                    warn!("mock-hf round {}: verification sim did not return HF ({other:?}); crushing harder", round + 1);
+                    warn!("mock-hf scan {} round {}: verification sim gave no HF ({other:?}); crushing harder", scan_attempt + 1, round + 1);
                 }
             }
             last = ovs;
-            factor_ppm = (factor_ppm.saturating_mul(55) / 100).max(100); // ×0.55, floor 0.01%
+            factor_ppm = (factor_ppm.saturating_mul(55) / 100).max(100); // ×0.55
         }
+        // Exhausted rounds with these sources — likely a missed collateral; re-scan.
     }
 
-    // Could not confirm below target (RPC down, or a pathological position).
-    // Return the most-aggressive override tried and say so.
+    // Could not confirm below target after re-scanning.
     let note = format!(
-        "--mock-hf: could NOT confirm simulated HF < target {target_hf_wad} after escalation (RPC issues or an unusual position). Applying the strongest crush ({} source(s)); the pre-flight may still show HF >= 1.0.",
+        "--mock-hf: could NOT confirm simulated HF < target {target_hf_wad} even after re-scanning collaterals (RPC issues or an unusual position). Applying the strongest crush ({} source(s)); the pre-flight may still show HF >= 1.0.",
         last.len()
     );
     warn!("{note}");
@@ -312,6 +325,20 @@ pub async fn build_signed_liquidation_tx(
         .await
         .map_err(|e| anyhow!("rpc connect: {e}"))?
         .erased();
+
+    // The liquidator MUST be deployed on the target chain. Calling an address
+    // with no code succeeds trivially in the EVM (empty return, ~21-25k gas),
+    // which would otherwise look like a passing pre-flight. Fail loudly instead.
+    let code = provider
+        .get_code_at(inputs.liquidator)
+        .await
+        .map_err(|e| anyhow!("get code at liquidator: {e}"))?;
+    if code.is_empty() {
+        return Err(anyhow!(
+            "No contract code at liquidator address {:#x} on this fork — is EXEC_LIQUIDATOR_ADDRESS the deployed AaveV3Liquidator on this chain?",
+            inputs.liquidator
+        ));
+    }
 
     let nonce = provider
         .get_transaction_count(from)

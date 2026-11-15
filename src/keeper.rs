@@ -416,14 +416,14 @@ impl Keeper {
         // silently dropping collaterals (`.ok()?`), leaving the mock-hf override
         // incomplete. Here a reserve is only skipped after it is CONFIRMED to
         // carry no collateral; a transient RPC error retries rather than drops.
-        stream::iter(reserves.into_iter())
+        let out = stream::iter(reserves.into_iter())
             .map(|meta| {
                 let dp = dp.clone();
                 let oracle = oracle.clone();
                 async move {
                     // getUserReserveData, retried.
                     let mut d = None;
-                    for i in 0..3u64 {
+                    for i in 0..5u64 {
                         match dp.getUserReserveData(meta.asset, user).call().await {
                             Ok(v) => {
                                 d = Some(v);
@@ -442,7 +442,7 @@ impl Keeper {
                     // This reserve IS collateral — resolve source + price, retried,
                     // so a transient RPC error never silently drops a real collateral.
                     let mut source = None;
-                    for i in 0..4u64 {
+                    for i in 0..5u64 {
                         match oracle.getSourceOfAsset(meta.asset).call().await {
                             Ok(v) => {
                                 source = Some(v);
@@ -455,7 +455,7 @@ impl Keeper {
                         }
                     }
                     let mut price = None;
-                    for i in 0..4u64 {
+                    for i in 0..5u64 {
                         match oracle.getAssetPrice(meta.asset).call().await {
                             Ok(v) => {
                                 price = Some(v);
@@ -474,10 +474,16 @@ impl Keeper {
                     Some((meta.asset, source, price))
                 }
             })
-            .buffer_unordered(4)
+            // Low concurrency: a rate-limited RPC returning fewer collaterals is
+            // worse than a slower-but-complete scan — a missed collateral makes
+            // the mock-hf override insufficient.
+            .buffer_unordered(2)
             .filter_map(|x| async move { x })
-            .collect()
-            .await
+            .collect::<Vec<(Address, Address, U256)>>()
+            .await;
+
+        info!("collateral_price_sources({user:#x}): found {} collateral reserve(s)", out.len());
+        out
     }
 
     /// Call Aave V3 Pool.getUserAccountData for a borrower.
