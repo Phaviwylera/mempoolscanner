@@ -20,8 +20,8 @@ use crate::exec::{
 use crate::state::{RpcStateBackend, StateBackend};
 use alloy::consensus::{SignableTransaction, TxEip1559};
 use alloy::network::TxSigner;
-use alloy::primitives::{address, Address, Bytes, B256, TxKind, U256};
-use alloy::providers::{DynProvider, Provider, ProviderBuilder};
+use alloy::primitives::{Address, Bytes, B256, TxKind, U256};
+use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner as LocalSigner;
 use alloy::sol;
 use alloy::sol_types::SolCall;
@@ -29,10 +29,6 @@ use anyhow::{anyhow, Result};
 use bytes::BytesMut;
 use std::sync::Arc;
 use tracing::warn;
-
-// Aave V3 Ethereum mainnet addresses, used only by the `--mock-hf` path.
-const AAVE_V3_POOL: Address = address!("87870bca3f3fd6335c3f4ce8392d69350b4fa4e2");
-const AAVE_V3_ORACLE: Address = address!("54586be62e3c3580375ae3723c145253060ca0c2");
 
 sol! {
     // Matches contracts/src/AaveV3Liquidator.sol exactly.
@@ -45,24 +41,6 @@ sol! {
             uint24 swapFee,
             uint256 minProfit
         ) external;
-    }
-
-    #[sol(rpc)]
-    interface IAavePoolRead {
-        function getUserAccountData(address user) external view returns (
-            uint256 totalCollateralBase,
-            uint256 totalDebtBase,
-            uint256 availableBorrowsBase,
-            uint256 currentLiquidationThreshold,
-            uint256 ltv,
-            uint256 healthFactor
-        );
-    }
-
-    #[sol(rpc)]
-    interface IAaveOracleRead {
-        function getAssetPrice(address asset) external view returns (uint256);
-        function getSourceOfAsset(address asset) external view returns (address);
     }
 }
 
@@ -77,40 +55,78 @@ fn stub_price_bytecode(price: U256) -> Bytes {
     Bytes::from(code)
 }
 
-/// Build the fork-only oracle override that drops `collateral`'s price so Aave
-/// computes a health factor near `target_hf_wad`. Returns `None` (no override)
-/// when the borrower is already at or below the target, or when the data needed
-/// to size the override cannot be read.
-async fn mock_hf_override(
-    provider: &DynProvider,
+/// Build the fork-only oracle overrides that drop a borrower's health factor to
+/// roughly `target_hf_wad`, so a not-yet-underwater position's liquidation
+/// executes in the pre-flight. Returns the overrides plus a human note.
+///
+/// It overrides **every** collateral reserve's price source (not just the one
+/// being seized): HF is the sum over all collaterals, so dropping a single
+/// asset is not enough when a borrower has several. Each source price is scaled
+/// by `(target/current)^2` — the square adds margin so the health factor lands
+/// comfortably below 1.0 even when a collateral asset is *also* a debt asset
+/// (crushing its price lowers both sides, muting the HF drop). Over-crushing is
+/// safe: Aave caps the seizure at the borrower's actual balance and the
+/// (still real-priced on Uniswap) seized collateral repays the flash loan.
+///
+/// This affects the SIMULATION ONLY — the signed transaction is unaffected.
+pub async fn compute_mock_hf_overrides(
+    keeper: &crate::keeper::Keeper,
     user: Address,
-    collateral: Address,
     target_hf_wad: U256,
-) -> Option<(CodeOverride, U256, Address, U256)> {
-    let pool = IAavePoolRead::new(AAVE_V3_POOL, provider);
-    let oracle = IAaveOracleRead::new(AAVE_V3_ORACLE, provider);
-
-    let current_hf = pool.getUserAccountData(user).call().await.ok()?.healthFactor;
-    if current_hf <= target_hf_wad {
-        // Already liquidatable at the target; no price manipulation needed.
-        return None;
-    }
-    let source = oracle.getSourceOfAsset(collateral).call().await.ok()?;
-    let price = oracle.getAssetPrice(collateral).call().await.ok()?;
-
-    // Scale the collateral price down by target/current so HF drops ~to target.
-    // HF is dominated by (but not exactly) this asset's contribution, so the
-    // simulated HF lands near, not exactly on, the target — reported as-is.
-    let mut new_price = price.saturating_mul(target_hf_wad) / current_hf.max(U256::from(1u8));
-    if new_price.is_zero() {
-        new_price = U256::from(1u8);
-    }
-
-    let ov = CodeOverride {
-        address: source,
-        code: stub_price_bytecode(new_price),
+) -> (Vec<CodeOverride>, Option<String>) {
+    let Some(current_hf) = keeper.user_health_factor(user).await else {
+        return (
+            Vec::new(),
+            Some("--mock-hf: could not read the live health factor; no override applied".into()),
+        );
     };
-    Some((ov, current_hf, source, new_price))
+    if current_hf <= target_hf_wad {
+        return (
+            Vec::new(),
+            Some(format!(
+                "--mock-hf: borrower HF {current_hf} already at/below target {target_hf_wad}; no override applied"
+            )),
+        );
+    }
+
+    let sources = keeper.collateral_price_sources(user).await;
+    if sources.is_empty() {
+        return (
+            Vec::new(),
+            Some("--mock-hf: no collateral price sources resolved; no override applied".into()),
+        );
+    }
+
+    // factor_ppm = (target/current)^2, in parts-per-million, clamped to [0.1%, 95%].
+    const PPM: u128 = 1_000_000;
+    let ratio_ppm = (target_hf_wad.saturating_mul(U256::from(PPM)) / current_hf.max(U256::from(1u8)))
+        .to::<u128>()
+        .min(PPM);
+    let mut factor_ppm = ratio_ppm.saturating_mul(ratio_ppm) / PPM;
+    factor_ppm = factor_ppm.clamp(1_000, 950_000);
+
+    let overrides: Vec<CodeOverride> = sources
+        .iter()
+        .map(|(source, price)| {
+            let new_price = (price.saturating_mul(U256::from(factor_ppm)) / U256::from(PPM))
+                .max(U256::from(1u8));
+            CodeOverride {
+                address: *source,
+                code: stub_price_bytecode(new_price),
+            }
+        })
+        .collect();
+
+    let note = format!(
+        "pre-flight only: {} collateral oracle source(s) scaled to {}.{:04}% of live price (HF {} → ~target {}). Signed tx unaffected.",
+        overrides.len(),
+        factor_ppm / 10_000,
+        factor_ppm % 10_000,
+        current_hf,
+        target_hf_wad,
+    );
+    warn!("{note}");
+    (overrides, Some(note))
 }
 
 /// Aave V3.1 close-factor threshold: below this health factor the whole debt
@@ -134,12 +150,13 @@ pub struct BuildTxInputs {
     pub swap_fee: u32,
     pub min_profit: U256,
     pub gas_limit: u64,
-    /// TESTING ONLY. When set, the revm pre-flight lowers the collateral's Aave
-    /// oracle price so the borrower's health factor computes near this target
-    /// (1e18-scaled), letting a liquidation execute against a position that is
-    /// not yet underwater. It affects the SIMULATION ONLY — the signed
-    /// transaction is identical with or without it.
-    pub mock_hf_wad: Option<U256>,
+    /// TESTING ONLY, fork-only. Precomputed Aave oracle-source bytecode
+    /// overrides applied to the revm pre-flight (see `compute_mock_hf_overrides`).
+    /// They affect the SIMULATION ONLY — the signed transaction is identical
+    /// with or without them. Empty in normal operation.
+    pub oracle_overrides: Vec<CodeOverride>,
+    /// Human note describing any `--mock-hf` override, surfaced in the report.
+    pub mock_hf_note: Option<String>,
 }
 
 /// Everything an operator needs to inspect and broadcast the transaction.
@@ -263,27 +280,9 @@ pub async fn build_signed_liquidation_tx(
         .await
         .map_err(|e| anyhow!("block number: {e}"))?;
 
-    // --mock-hf: build a fork-only oracle override so a not-yet-underwater
-    // position computes HF near the target and the liquidation path executes.
-    let (overrides, mock_hf_note) = match inputs.mock_hf_wad {
-        Some(target) => match mock_hf_override(&provider, inputs.user, inputs.collateral, target).await {
-            Some((ov, current_hf, source, new_price)) => {
-                let note = format!(
-                    "pre-flight only: collateral oracle source {source:#x} price overridden to {new_price} \
-                     (8-dec) so HF (was {current_hf}) computes near target {target}. Signed tx is unaffected."
-                );
-                warn!("{note}");
-                (vec![ov], Some(note))
-            }
-            None => (
-                Vec::new(),
-                Some(format!(
-                    "--mock-hf target {target} not applied: borrower already at/below target, or oracle data unreadable"
-                )),
-            ),
-        },
-        None => (Vec::new(), None),
-    };
+    // --mock-hf: fork-only oracle overrides, precomputed by the caller.
+    let overrides = inputs.oracle_overrides.clone();
+    let mock_hf_note = inputs.mock_hf_note.clone();
 
     let backend: Arc<dyn StateBackend> = Arc::new(RpcStateBackend::new(provider));
     let sim = simulate_raw_call_with_overrides(
@@ -393,7 +392,8 @@ pub async fn build_tx_from_opportunity(
         swap_fee,
         min_profit,
         gas_limit,
-        mock_hf_wad: None,
+        oracle_overrides: Vec::new(),
+        mock_hf_note: None,
     };
 
     build_signed_liquidation_tx(signer, &inputs).await
@@ -443,6 +443,12 @@ pub async fn build_tx_standalone(
         None => selection.debt_amount / U256::from(2u8),
     };
 
+    // Precompute the fork-only oracle overrides (all collateral sources).
+    let (oracle_overrides, mock_hf_note) = match mock_hf_wad {
+        Some(target) => compute_mock_hf_overrides(&keeper, user, target).await,
+        None => (Vec::new(), None),
+    };
+
     let inputs = BuildTxInputs {
         rpc_url: rpc_url.to_string(),
         chain_id,
@@ -454,7 +460,8 @@ pub async fn build_tx_standalone(
         swap_fee,
         min_profit,
         gas_limit,
-        mock_hf_wad,
+        oracle_overrides,
+        mock_hf_note,
     };
 
     build_signed_liquidation_tx(signer, &inputs).await

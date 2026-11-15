@@ -90,6 +90,8 @@ alloy::sol! {
     interface IAaveOracle {
         // Price in the oracle's USD base currency, 8 decimals.
         function getAssetPrice(address asset) external view returns (uint256);
+        // The price feed source (adapter) the oracle reads for this asset.
+        function getSourceOfAsset(address asset) external view returns (address);
     }
 
     #[sol(rpc)]
@@ -392,6 +394,45 @@ impl Keeper {
             .await
             .ok()
             .map(|d| d.health_factor)
+    }
+
+    /// For each reserve the borrower uses as collateral, return its Aave oracle
+    /// price source (adapter) address and current 8-decimal price. Used by the
+    /// `--mock-hf` builder to crush every collateral source in the fork, not
+    /// just the one being seized (a borrower with multiple collaterals needs
+    /// all of them dropped for the health factor to fall).
+    pub async fn collateral_price_sources(&self, user: Address) -> Vec<(Address, U256)> {
+        let reserves = match self.reserves().await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("collateral_price_sources: reserve list unavailable: {e}");
+                return Vec::new();
+            }
+        };
+        let dp = IProtocolDataProvider::new(AAVE_PROTOCOL_DATA_PROVIDER, &self.provider);
+        let oracle = IAaveOracle::new(AAVE_V3_ORACLE, &self.provider);
+
+        stream::iter(reserves.into_iter())
+            .map(|meta| {
+                let dp = dp.clone();
+                let oracle = oracle.clone();
+                async move {
+                    let d = dp.getUserReserveData(meta.asset, user).call().await.ok()?;
+                    if !d.usageAsCollateralEnabled || d.currentATokenBalance.is_zero() {
+                        return None;
+                    }
+                    let source = oracle.getSourceOfAsset(meta.asset).call().await.ok()?;
+                    let price = oracle.getAssetPrice(meta.asset).call().await.ok()?;
+                    if price.is_zero() {
+                        return None;
+                    }
+                    Some((source, price))
+                }
+            })
+            .buffer_unordered(8)
+            .filter_map(|x| async move { x })
+            .collect()
+            .await
     }
 
     /// Call Aave V3 Pool.getUserAccountData for a borrower.

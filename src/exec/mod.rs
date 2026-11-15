@@ -36,8 +36,9 @@ mod simulate;
 
 pub use broadcast::broadcast_and_confirm;
 pub use build_tx::{
-    build_signed_liquidation_tx, build_tx_from_opportunity, build_tx_standalone, close_factor_debt,
-    encode_execute_liquidation, BuildTxInputs, BuildTxReport, DEFAULT_SWAP_FEE,
+    build_signed_liquidation_tx, build_tx_from_opportunity, build_tx_standalone,
+    close_factor_debt, compute_mock_hf_overrides, encode_execute_liquidation, BuildTxInputs,
+    BuildTxReport, DEFAULT_SWAP_FEE,
 };
 pub use sign::load_signer_from_env;
 pub use simulate::simulate_liquidation;

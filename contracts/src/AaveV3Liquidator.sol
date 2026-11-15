@@ -168,8 +168,13 @@ contract AaveV3Liquidator is IFlashLoanSimpleReceiver, Ownable2Step, ReentrancyG
         // receiveAToken=false: take the underlying, which is what gets swapped.
         POOL.liquidationCall(collateralAsset, debtAsset, user, debtToCover, false);
 
-        seized = IERC20(collateralAsset).balanceOf(address(this)) - balanceBefore;
-        require(seized > 0, "NOTHING_SEIZED");
+        // Guard BEFORE subtracting: if the liquidation seized nothing (e.g. the
+        // pool capped it to zero), `after - before` would underflow and panic
+        // inside the flash-loan callback instead of giving a clean revert, and
+        // the contract would otherwise go on to swap 0 tokens on Uniswap.
+        uint256 collateralAfter = IERC20(collateralAsset).balanceOf(address(this));
+        require(collateralAfter > balanceBefore, "NOTHING_SEIZED");
+        seized = collateralAfter - balanceBefore;
     }
 
     /// @dev Single-hop exact-input swap on Uniswap V3.

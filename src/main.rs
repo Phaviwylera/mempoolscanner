@@ -425,6 +425,14 @@ async fn run_build_tx(target: &str, mock_hf: Option<f64>) -> Result<()> {
         println!("mock HF         {v} (pre-flight override, TESTING — signed tx unaffected)");
     }
 
+    // Precompute the fork-only oracle overrides (every collateral source).
+    let (oracle_overrides, mock_hf_note) = match mock_hf_wad {
+        Some(target) => {
+            mempool_scanner::exec::compute_mock_hf_overrides(&keeper, user, target).await
+        }
+        None => (Vec::new(), None),
+    };
+
     let inputs = BuildTxInputs {
         rpc_url,
         chain_id,
@@ -436,7 +444,8 @@ async fn run_build_tx(target: &str, mock_hf: Option<f64>) -> Result<()> {
         swap_fee,
         min_profit,
         gas_limit,
-        mock_hf_wad,
+        oracle_overrides,
+        mock_hf_note,
     };
 
     info!("Running revm pre-flight and signing (offline, no broadcast)…");
