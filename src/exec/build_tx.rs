@@ -310,15 +310,6 @@ pub async fn build_signed_liquidation_tx(
 
     let from = signer.address();
 
-    let calldata = encode_execute_liquidation(
-        inputs.user,
-        inputs.collateral,
-        inputs.debt_asset,
-        inputs.debt_to_cover,
-        inputs.swap_fee,
-        inputs.min_profit,
-    );
-
     // --- read-only RPC: nonce + gas ---
     let provider = ProviderBuilder::new()
         .connect(&inputs.rpc_url)
@@ -367,22 +358,64 @@ pub async fn build_signed_liquidation_tx(
 
     // --mock-hf: fork-only oracle overrides, precomputed by the caller.
     let overrides = inputs.oracle_overrides.clone();
-    let mock_hf_note = inputs.mock_hf_note.clone();
+    let mut mock_hf_note = inputs.mock_hf_note.clone();
 
     let backend: Arc<dyn StateBackend> = Arc::new(RpcStateBackend::new(provider));
-    let sim = simulate_raw_call_with_overrides(
-        backend,
-        block,
-        block_ts,
-        overrides,
-        from,
-        inputs.liquidator,
-        calldata.clone(),
-        U256::ZERO,
-        inputs.gas_limit.max(1_000_000),
-    )
-    .await
-    .map_err(|e| anyhow!("revm pre-flight: {e}"))?;
+
+    // Search debtToCover downward. Aave V3.3's dust rule reverts a partial
+    // liquidation that would leave the reserve's remaining debt (or the seized
+    // collateral leftover) non-zero but below the ~1000-base-currency minimum
+    // (MustNotLeaveDust, 0xb629b0e4). The close-factor amount often trips it, so
+    // on that specific revert we halve debtToCover and re-simulate until the
+    // liquidation actually succeeds, and sign THAT amount. Other reverts are not
+    // retried (reducing would not help).
+    const MUST_NOT_LEAVE_DUST: [u8; 4] = [0xb6, 0x29, 0xb0, 0xe4];
+    let mut debt_to_cover = inputs.debt_to_cover;
+    let mut calldata = encode_execute_liquidation(
+        inputs.user, inputs.collateral, inputs.debt_asset, debt_to_cover, inputs.swap_fee, inputs.min_profit,
+    );
+    let mut sim;
+    let mut reductions = 0u32;
+    loop {
+        sim = simulate_raw_call_with_overrides(
+            backend.clone(),
+            block,
+            block_ts,
+            overrides.clone(),
+            from,
+            inputs.liquidator,
+            calldata.clone(),
+            U256::ZERO,
+            inputs.gas_limit.max(1_000_000),
+        )
+        .await
+        .map_err(|e| anyhow!("revm pre-flight: {e}"))?;
+
+        let is_dust = !sim.success
+            && sim.output.len() >= 4
+            && sim.output[0..4] == MUST_NOT_LEAVE_DUST;
+        if sim.success || !is_dust || reductions >= 10 || debt_to_cover <= U256::from(1u8) {
+            break;
+        }
+        // Leave more debt behind so the remainder clears the dust threshold.
+        debt_to_cover /= U256::from(2u8);
+        reductions += 1;
+        warn!("build-tx: debtToCover hit Aave dust rule; reducing to {debt_to_cover} (attempt {reductions})");
+        calldata = encode_execute_liquidation(
+            inputs.user, inputs.collateral, inputs.debt_asset, debt_to_cover, inputs.swap_fee, inputs.min_profit,
+        );
+    }
+    if reductions > 0 && sim.success {
+        let msg = format!(
+            "debtToCover reduced to {debt_to_cover} ({} halving(s)) to satisfy Aave's MustNotLeaveDust rule",
+            reductions
+        );
+        warn!("{msg}");
+        mock_hf_note = Some(match mock_hf_note {
+            Some(n) => format!("{n} | {msg}"),
+            None => msg,
+        });
+    }
 
     // --- sign (EIP-1559) ---
     let mut tx = TxEip1559 {
@@ -421,7 +454,7 @@ pub async fn build_signed_liquidation_tx(
         user: format!("{:#x}", inputs.user),
         collateral_asset: format!("{:#x}", inputs.collateral),
         debt_asset: format!("{:#x}", inputs.debt_asset),
-        debt_to_cover: inputs.debt_to_cover.to_string(),
+        debt_to_cover: debt_to_cover.to_string(),
         swap_fee: inputs.swap_fee,
         min_profit: inputs.min_profit.to_string(),
         simulated_ok: sim.success,
