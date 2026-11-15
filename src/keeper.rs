@@ -412,24 +412,69 @@ impl Keeper {
         let dp = IProtocolDataProvider::new(AAVE_PROTOCOL_DATA_PROVIDER, &self.provider);
         let oracle = IAaveOracle::new(AAVE_V3_ORACLE, &self.provider);
 
+        // Lower concurrency + per-reserve retries: a flaky/rate-limited RPC was
+        // silently dropping collaterals (`.ok()?`), leaving the mock-hf override
+        // incomplete. Here a reserve is only skipped after it is CONFIRMED to
+        // carry no collateral; a transient RPC error retries rather than drops.
         stream::iter(reserves.into_iter())
             .map(|meta| {
                 let dp = dp.clone();
                 let oracle = oracle.clone();
                 async move {
-                    let d = dp.getUserReserveData(meta.asset, user).call().await.ok()?;
+                    // getUserReserveData, retried.
+                    let mut d = None;
+                    for i in 0..3u64 {
+                        match dp.getUserReserveData(meta.asset, user).call().await {
+                            Ok(v) => {
+                                d = Some(v);
+                                break;
+                            }
+                            Err(_) => {
+                                tokio::time::sleep(std::time::Duration::from_millis(150 * (i + 1)))
+                                    .await
+                            }
+                        }
+                    }
+                    let d = d?;
                     if !d.usageAsCollateralEnabled || d.currentATokenBalance.is_zero() {
                         return None;
                     }
-                    let source = oracle.getSourceOfAsset(meta.asset).call().await.ok()?;
-                    let price = oracle.getAssetPrice(meta.asset).call().await.ok()?;
+                    // This reserve IS collateral — resolve source + price, retried,
+                    // so a transient RPC error never silently drops a real collateral.
+                    let mut source = None;
+                    for i in 0..4u64 {
+                        match oracle.getSourceOfAsset(meta.asset).call().await {
+                            Ok(v) => {
+                                source = Some(v);
+                                break;
+                            }
+                            Err(_) => {
+                                tokio::time::sleep(std::time::Duration::from_millis(150 * (i + 1)))
+                                    .await
+                            }
+                        }
+                    }
+                    let mut price = None;
+                    for i in 0..4u64 {
+                        match oracle.getAssetPrice(meta.asset).call().await {
+                            Ok(v) => {
+                                price = Some(v);
+                                break;
+                            }
+                            Err(_) => {
+                                tokio::time::sleep(std::time::Duration::from_millis(150 * (i + 1)))
+                                    .await
+                            }
+                        }
+                    }
+                    let (source, price) = (source?, price?);
                     if price.is_zero() {
                         return None;
                     }
                     Some((meta.asset, source, price))
                 }
             })
-            .buffer_unordered(8)
+            .buffer_unordered(4)
             .filter_map(|x| async move { x })
             .collect()
             .await

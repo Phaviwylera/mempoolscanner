@@ -439,7 +439,7 @@ async fn run_build_tx(target: &str, mock_hf: Option<f64>) -> Result<()> {
     // Precompute the fork-only oracle overrides (every collateral source).
     let (oracle_overrides, mock_hf_note) = match mock_hf_wad {
         Some(target) => {
-            mempool_scanner::exec::compute_mock_hf_overrides(&keeper, user, target).await
+            mempool_scanner::exec::compute_mock_hf_overrides(&keeper, &rpc_url, user, target).await
         }
         None => (Vec::new(), None),
     };
@@ -536,7 +536,7 @@ async fn run_debug_mock_hf(target: &str, mock_hf: f64) -> Result<()> {
         println!("  {asset:#x}  src {source:#x}  price {price}");
     }
 
-    let (overrides, note) = compute_mock_hf_overrides(&keeper, user, target_wad).await;
+    let (overrides, note) = compute_mock_hf_overrides(&keeper, &rpc, user, target_wad).await;
     println!("\noverrides built     : {} source(s)", overrides.len());
     if let Some(n) = &note {
         println!("note                : {n}");

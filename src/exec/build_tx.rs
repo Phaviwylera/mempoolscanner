@@ -55,22 +55,33 @@ fn stub_price_bytecode(price: U256) -> Bytes {
     Bytes::from(code)
 }
 
-/// Build the fork-only oracle overrides that drop a borrower's health factor to
-/// roughly `target_hf_wad`, so a not-yet-underwater position's liquidation
+/// Encode `getUserAccountData(address)` calldata (selector 0xbf92857c).
+fn encode_get_user_account_data(user: Address) -> Bytes {
+    let mut d = vec![0xbf, 0x92, 0x85, 0x7c];
+    d.extend_from_slice(&[0u8; 12]);
+    d.extend_from_slice(user.as_slice());
+    Bytes::from(d)
+}
+
+/// Build the fork-only oracle overrides that drop a borrower's health factor
+/// below `target_hf_wad`, so a not-yet-underwater position's liquidation
 /// executes in the pre-flight. Returns the overrides plus a human note.
 ///
 /// It overrides **every** collateral reserve's price source (not just the one
 /// being seized): HF is the sum over all collaterals, so dropping a single
-/// asset is not enough when a borrower has several. Each source price is scaled
-/// by `(target/current)^2` — the square adds margin so the health factor lands
-/// comfortably below 1.0 even when a collateral asset is *also* a debt asset
-/// (crushing its price lowers both sides, muting the HF drop). Over-crushing is
-/// safe: Aave caps the seizure at the borrower's actual balance and the
-/// (still real-priced on Uniswap) seized collateral repays the flash loan.
+/// asset is not enough when a borrower has several. It is **self-correcting**:
+/// it re-simulates `getUserAccountData` with the overrides applied (in the same
+/// revm engine the pre-flight uses) and, if the simulated HF has not dropped
+/// below the target, crushes the prices harder and retries. This is robust to a
+/// collateral being missed (flaky RPC) and to a collateral that is also a debt
+/// asset (crushing its price lowers both sides, muting the HF drop).
+/// Over-crushing is safe: Aave caps the seizure at the borrower's actual balance
+/// and the (still real-priced on Uniswap) seized collateral repays the flash loan.
 ///
 /// This affects the SIMULATION ONLY — the signed transaction is unaffected.
 pub async fn compute_mock_hf_overrides(
     keeper: &crate::keeper::Keeper,
+    rpc_url: &str,
     user: Address,
     target_hf_wad: U256,
 ) -> (Vec<CodeOverride>, Option<String>) {
@@ -96,42 +107,81 @@ pub async fn compute_mock_hf_overrides(
             Some("--mock-hf: no collateral price sources resolved; no override applied".into()),
         );
     }
+    for (asset, source, price) in &sources {
+        warn!("mock-hf collateral: asset {asset:#x} source {source:#x} live price {price}");
+    }
 
-    // factor_ppm = (target/current)^2, in parts-per-million, clamped to [0.1%, 95%].
+    // Build a verification backend on the same RPC the pre-flight uses.
+    let verify = async {
+        let provider = ProviderBuilder::new().connect(rpc_url).await.ok()?.erased();
+        let block = provider.get_block_number().await.ok()?;
+        let ts = crate::exec::fetch_block_timestamp(&provider, block).await;
+        let backend: Arc<dyn StateBackend> = Arc::new(RpcStateBackend::new(provider));
+        Some((backend, block, ts))
+    }
+    .await;
+
     const PPM: u128 = 1_000_000;
     let ratio_ppm = (target_hf_wad.saturating_mul(U256::from(PPM)) / current_hf.max(U256::from(1u8)))
         .to::<u128>()
         .min(PPM);
-    let mut factor_ppm = ratio_ppm.saturating_mul(ratio_ppm) / PPM;
-    factor_ppm = factor_ppm.clamp(1_000, 950_000);
+    // Start at (target/current)^2 and crush harder each round until the SIMULATED
+    // HF is below target. Multiplying by 0.55 per round converges fast.
+    let mut factor_ppm = (ratio_ppm.saturating_mul(ratio_ppm) / PPM).clamp(500, 950_000);
 
-    let overrides: Vec<CodeOverride> = sources
-        .iter()
-        .map(|(asset, source, price)| {
-            let new_price = (price.saturating_mul(U256::from(factor_ppm)) / U256::from(PPM))
-                .max(U256::from(1u8));
-            // Log EVERY asset being overridden so multi-collateral borrowers are
-            // visible (a borrower with WETH+WBTC+cbBTC must show three lines).
-            warn!(
-                "mock-hf override: asset {asset:#x} source {source:#x} price {price} -> {new_price}"
-            );
-            CodeOverride {
+    let build = |factor_ppm: u128| -> Vec<CodeOverride> {
+        sources
+            .iter()
+            .map(|(_, source, price)| CodeOverride {
                 address: *source,
-                code: stub_price_bytecode(new_price),
-            }
-        })
-        .collect();
+                code: stub_price_bytecode(
+                    (price.saturating_mul(U256::from(factor_ppm)) / U256::from(PPM))
+                        .max(U256::from(1u8)),
+                ),
+            })
+            .collect()
+    };
 
+    let data = encode_get_user_account_data(user);
+    let mut last = build(factor_ppm);
+
+    if let Some((backend, block, ts)) = verify {
+        for round in 0..6u32 {
+            let ovs = build(factor_ppm);
+            match simulate_raw_call_with_overrides(
+                backend.clone(), block, ts, ovs.clone(), user, crate::keeper::AAVE_V3_POOL, data.clone(), U256::ZERO, 3_000_000,
+            )
+            .await
+            {
+                Ok(sim) if sim.success && sim.output.len() >= 192 => {
+                    let hf = U256::from_be_slice(&sim.output[160..192]);
+                    if hf < target_hf_wad {
+                        let note = format!(
+                            "pre-flight: {} collateral source(s) crushed to {}.{:02}% of live price → simulated HF {hf} (< target {target_hf_wad}) after {} round(s). Signed tx unaffected.",
+                            ovs.len(), factor_ppm / 10_000, (factor_ppm % 10_000) / 100, round + 1,
+                        );
+                        warn!("{note}");
+                        return (ovs, Some(note));
+                    }
+                    warn!("mock-hf round {}: crush {factor_ppm}ppm gave HF {hf} (>= target); crushing harder", round + 1);
+                }
+                other => {
+                    warn!("mock-hf round {}: verification sim did not return HF ({other:?}); crushing harder", round + 1);
+                }
+            }
+            last = ovs;
+            factor_ppm = (factor_ppm.saturating_mul(55) / 100).max(100); // ×0.55, floor 0.01%
+        }
+    }
+
+    // Could not confirm below target (RPC down, or a pathological position).
+    // Return the most-aggressive override tried and say so.
     let note = format!(
-        "pre-flight only: {} collateral oracle source(s) scaled to {}.{:04}% of live price (HF {} → ~target {}). Signed tx unaffected.",
-        overrides.len(),
-        factor_ppm / 10_000,
-        factor_ppm % 10_000,
-        current_hf,
-        target_hf_wad,
+        "--mock-hf: could NOT confirm simulated HF < target {target_hf_wad} after escalation (RPC issues or an unusual position). Applying the strongest crush ({} source(s)); the pre-flight may still show HF >= 1.0.",
+        last.len()
     );
     warn!("{note}");
-    (overrides, Some(note))
+    (last, Some(note))
 }
 
 /// Aave V3.1 close-factor threshold: below this health factor the whole debt
@@ -454,7 +504,7 @@ pub async fn build_tx_standalone(
 
     // Precompute the fork-only oracle overrides (all collateral sources).
     let (oracle_overrides, mock_hf_note) = match mock_hf_wad {
-        Some(target) => compute_mock_hf_overrides(&keeper, user, target).await,
+        Some(target) => compute_mock_hf_overrides(&keeper, rpc_url, user, target).await,
         None => (Vec::new(), None),
     };
 
