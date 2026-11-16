@@ -27,7 +27,8 @@ use alloy::sol_types::{SolCall, SolValue};
 use anyhow::{anyhow, bail, Result};
 use futures_util::StreamExt;
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
 
@@ -280,6 +281,71 @@ where
         }
     }
     Ok(())
+}
+
+/// Orchestrate one SVR candidate: re-check borrower health, and for each
+/// borrower now liquidatable, back-run via [`crate::exec::execute_svr_backrun`]
+/// (gated — dry-run logs the bundle, live submits it). Opportunities come from
+/// the keeper's shared `recent_opportunities` map, which `poll_borrowers` fills.
+pub async fn handle_svr_candidate(
+    cand: SvrCandidate,
+    keeper: Arc<crate::keeper::Keeper>,
+    exec: Option<Arc<crate::exec::ExecConfig>>,
+    opps: Arc<tokio::sync::RwLock<HashMap<String, crate::exec::LiquidationOpportunity>>>,
+) {
+    info!(
+        feed = %cand.update.feed,
+        median_price = %cand.update.median_price,
+        hint_tx = %cand.hint_tx,
+        "SVR update detected; re-checking borrower health"
+    );
+    let healths = match keeper.poll_borrowers().await {
+        Ok(h) => h,
+        Err(e) => {
+            warn!("SVR: keeper poll failed: {e}");
+            return;
+        }
+    };
+    let liquidatable: Vec<Address> = healths
+        .iter()
+        .filter(|h| h.is_liquidatable)
+        .map(|h| h.address)
+        .collect();
+    if liquidatable.is_empty() {
+        info!("SVR: no borrower liquidatable after {}", cand.hint_tx);
+        return;
+    }
+    warn!(
+        "SVR BACKRUN CANDIDATE: {} liquidatable borrower(s) after {} on feed {}",
+        liquidatable.len(),
+        cand.hint_tx,
+        cand.update.feed
+    );
+
+    let Some(cfg) = exec.as_ref() else {
+        warn!("SVR: execution not configured (run with --execute); cannot back-run");
+        return;
+    };
+
+    // Snapshot the matching opportunities; never hold the lock across an await.
+    let targets: Vec<crate::exec::LiquidationOpportunity> = {
+        let map = opps.read().await;
+        map.values()
+            .filter(|o| o.borrower.map(|b| liquidatable.contains(&b)).unwrap_or(false))
+            .cloned()
+            .collect()
+    };
+    if targets.is_empty() {
+        warn!("SVR: liquidatable borrower(s) have no built opportunity yet; skipping back-run");
+        return;
+    }
+
+    for opp in targets {
+        match crate::exec::execute_svr_backrun(cfg, &opp, cand.hint_tx).await {
+            Ok(outcome) => info!("SVR back-run outcome for {:?}: {outcome:?}", opp.borrower),
+            Err(e) => warn!("SVR back-run failed for {:?}: {e}", opp.borrower),
+        }
+    }
 }
 
 /// Parse one SSE frame into a candidate, if it is an allowlisted SVR update.

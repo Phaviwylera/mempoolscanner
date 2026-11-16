@@ -8,7 +8,9 @@ use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::{B256, Bytes, U256};
 use alloy::providers::{ext::MevApi, DynProvider, Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner as LocalSigner;
-use alloy_rpc_types_mev::{EthBundleHash, EthCallBundle, EthSendBundle};
+use alloy_rpc_types_mev::{
+    BundleItem, EthBundleHash, EthCallBundle, EthSendBundle, MevSendBundle, ProtocolVersion,
+};
 use anyhow::{anyhow, Result};
 use std::time::Duration;
 use tracing::{info, warn};
@@ -164,6 +166,61 @@ pub async fn simulate_bundle(
         resp.coinbase_diff, resp.total_gas_used
     );
     Ok(true)
+}
+
+/// Submit a MEV-Share back-run bundle via `mev_sendBundle`: the SVR update
+/// transaction referenced **by hash** (the relay substitutes the real tx), then
+/// our liquidation transaction. The 90%-rule bribe is already baked into the
+/// liquidation tx's priority fee by `gas::plan_bid` before signing.
+///
+/// Returns the bundle hash on success.
+pub async fn submit_mev_share_bundle(
+    relay: &Url,
+    signer: &LocalSigner,
+    svr_hint_tx: B256,
+    encoded_liq_tx: &[u8],
+    rpc_url: &str,
+) -> Result<Option<B256>> {
+    let provider = ProviderBuilder::new()
+        .connect(rpc_url)
+        .await
+        .map_err(|e| anyhow!("rpc connect: {e}"))?
+        .erased();
+    let latest = provider
+        .get_block_number()
+        .await
+        .map_err(|e| anyhow!("block number: {e}"))?;
+    let target_block = latest.saturating_add(1);
+
+    let fb = ProviderBuilder::new()
+        .connect(relay.as_str())
+        .await
+        .map_err(|e| anyhow!("flashbots connect: {e}"))?
+        .erased();
+
+    let body = vec![
+        // tx[0]: the SVR oracle update, back-run by hash reference (the relay
+        // substitutes the real transaction).
+        BundleItem::Hash { hash: svr_hint_tx },
+        // tx[1]: our liquidation — must land, so canRevert = false.
+        BundleItem::Tx {
+            tx: Bytes::from(encoded_liq_tx.to_vec()),
+            can_revert: false,
+        },
+    ];
+    let bundle = MevSendBundle::new(
+        target_block,
+        Some(target_block + 2),
+        ProtocolVersion::V0_1,
+        body,
+    );
+
+    let resp: Option<EthBundleHash> = fb
+        .send_mev_bundle(bundle)
+        .with_auth(signer.clone())
+        .await
+        .map_err(|e| anyhow!("mev_sendBundle: {e}"))?;
+    Ok(resp.map(|h| h.bundle_hash))
 }
 
 /// Submit the signed transaction to a private relay.

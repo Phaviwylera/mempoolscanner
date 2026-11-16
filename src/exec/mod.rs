@@ -27,6 +27,7 @@ use anyhow::{anyhow, Result};
 use bytes::BytesMut;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
+use tracing::info;
 use url::Url;
 
 mod broadcast;
@@ -37,6 +38,7 @@ mod simulate;
 
 pub use broadcast::broadcast_and_confirm;
 pub use broadcast::simulate_bundle;
+pub use broadcast::submit_mev_share_bundle;
 pub use gas::{plan_bid, BidDecision, BidPlan, FeeEnvelope};
 pub use build_tx::{
     build_signed_liquidation_tx, build_tx_from_opportunity, build_tx_standalone,
@@ -362,6 +364,87 @@ pub async fn execute_liquidation(
     )?;
 
     Ok(outcome)
+}
+
+/// SVR back-run (Phase 6). Build the liquidation tx for an already-detected
+/// liquidatable borrower with the gas-aware 90% bid, then bundle it **behind**
+/// the SVR oracle update (referenced by hash) and submit via `mev_sendBundle`.
+///
+/// Gated exactly like [`execute_liquidation`]: in `dry_run` it logs the bundle
+/// it WOULD submit and writes an audit entry, but sends nothing. Live submission
+/// requires `FLASHBOTS_RELAY` and the deployed liquidator (enforced at startup).
+pub async fn execute_svr_backrun(
+    cfg: &ExecConfig,
+    opportunity: &LiquidationOpportunity,
+    svr_hint_tx: B256,
+) -> Result<ExecOutcome> {
+    if !cfg.enabled {
+        return Ok(ExecOutcome::Skipped {
+            reason: "execution disabled".to_string(),
+        });
+    }
+    let signer = cfg
+        .signer
+        .as_ref()
+        .ok_or_else(|| anyhow!("no signer configured for SVR back-run"))?;
+
+    // Gas-aware 90% bid — aborts before signing if it cannot pay for itself.
+    let fees = gas::fetch_fees(cfg.rpc_url.as_str()).await?;
+    let plan = match gas::plan_bid(
+        opportunity.gross_profit_wei,
+        opportunity.gas_limit,
+        fees,
+        cfg.bid_fraction_bps,
+        cfg.min_profit_wei,
+        cfg.safety_buffer_wei,
+    ) {
+        BidDecision::Execute(p) => p,
+        BidDecision::Abort(reason) => return Ok(ExecOutcome::Skipped { reason }),
+    };
+
+    // Sign the liquidation tx at the computed bid fees (the bribe rides the
+    // priority fee, so the bundle itself needs no coinbase transfer).
+    let encoded = sign_transaction(
+        signer,
+        opportunity,
+        cfg.chain_id,
+        plan.max_fee_per_gas,
+        plan.max_priority_fee_per_gas,
+    )
+    .await?;
+    let tx_hash = alloy::primitives::keccak256(&encoded);
+
+    if cfg.dry_run {
+        info!(
+            svr_tx = %svr_hint_tx,
+            liq_tx = %tx_hash,
+            gas_cost_wei = %plan.gas_cost_wei,
+            builder_bribe_wei = %plan.builder_bribe_wei,
+            net_profit_wei = %plan.net_profit_wei,
+            "SVR DRY-RUN bundle [hash(svr) -> tx(liq)] constructed; NOT sent"
+        );
+        append_audit(cfg, opportunity, Some(tx_hash), "svr_dry_run_signed", &plan, None)?;
+        return Ok(ExecOutcome::Simulated {
+            profit: plan.net_profit_wei,
+        });
+    }
+
+    // Live: submit the MEV-Share back-run bundle.
+    let relay = cfg
+        .flashbots_relay
+        .as_ref()
+        .ok_or_else(|| anyhow!("FLASHBOTS_RELAY required for SVR live submission"))?;
+    let bundle_hash =
+        submit_mev_share_bundle(relay, signer, svr_hint_tx, &encoded, cfg.rpc_url.as_str()).await?;
+    info!(
+        svr_tx = %svr_hint_tx,
+        liq_tx = %tx_hash,
+        bundle_hash = ?bundle_hash,
+        net_profit_wei = %plan.net_profit_wei,
+        "SVR LIVE bundle submitted via mev_sendBundle"
+    );
+    append_audit(cfg, opportunity, Some(tx_hash), "svr_live_broadcast", &plan, bundle_hash)?;
+    Ok(ExecOutcome::Broadcast { tx_hash })
 }
 
 /// Build and RLP-encode (EIP-2718) the signed transaction envelope for the
