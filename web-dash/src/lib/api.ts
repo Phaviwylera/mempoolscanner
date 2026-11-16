@@ -136,6 +136,22 @@ export function fetchLiquidations(signal?: AbortSignal) {
   return getJson<LiquidationsResponse>("/api/liquidations", signal);
 }
 
+/**
+ * Fetch the raw dry-run / execution audit log (`exec_audit.jsonl`) as text.
+ * The endpoint returns an empty body with 200 when nothing has been logged yet,
+ * so the caller distinguishes "no logs" from a failure via `text.length`.
+ */
+export async function fetchAuditLogs(signal?: AbortSignal): Promise<string> {
+  const res = await fetch(`${API_BASE}/api/audit-logs/download`, {
+    signal,
+    headers: { accept: "application/jsonl, text/plain" },
+  });
+  if (!res.ok) {
+    throw new Error(`/api/audit-logs/download -> HTTP ${res.status} ${res.statusText}`);
+  }
+  return res.text();
+}
+
 /** GET /api/liquidations?inspect=0x… — returns { inspected } only. */
 export async function inspectAddress(addr: string, signal?: AbortSignal) {
   const r = await getJson<{ inspected: Inspected }>(

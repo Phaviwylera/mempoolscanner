@@ -2,6 +2,7 @@ import { Users, HeartPulse, Siren, CircleDollarSign } from "lucide-react";
 import type { ReactNode } from "react";
 import { BAND_TEXT, formatHf, formatUsd, hfBand } from "../lib/format";
 import type { Row } from "../lib/api";
+import AuditLogButton from "./AuditLogButton";
 
 function Card({
   icon,
@@ -78,6 +79,10 @@ export default function Header({
         value={ethUsd === undefined ? "—" : `$${formatUsd(ethUsd)}`}
         sub={fxSource ? `source: ${fxSource}` : undefined}
       />
+      {/* Monitor the EC2 dry run without a terminal: pull exec_audit.jsonl. */}
+      <div className="flex w-full items-center justify-end">
+        <AuditLogButton />
+      </div>
     </div>
   );
 }

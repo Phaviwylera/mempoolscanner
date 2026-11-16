@@ -13,7 +13,7 @@
 
 use axum::{
     extract::{Path, Query, State},
-    http::{header, StatusCode},
+    http::header,
     response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
@@ -571,32 +571,33 @@ async fn get_audit_logs(
                 .collect();
             Json(json!({ "entries": entries, "count": entries.len() })).into_response()
         }
-        Err(_) => StatusCode::NOT_FOUND.into_response(),
+        // The audit file is written lazily on the first execution/dry-run, so a
+        // missing file is the normal "nothing yet" state, not an error. Return
+        // an empty set with 200 so the dashboard can show "No dry run logs yet"
+        // instead of tripping on a 404.
+        Err(_) => Json(json!({ "entries": [], "count": 0 })).into_response(),
     }
 }
 
 /// GET /api/audit-logs/download — serve `exec_audit.jsonl` as a file download.
+///
+/// When the file does not exist yet, this serves an **empty** attachment with a
+/// 200 rather than a 404, so the dashboard's "Audit Logs" download button always
+/// behaves and the operator gets an (empty) file rather than an error.
 async fn download_audit_logs(
     State(state): State<Arc<AppState>>,
 ) -> Response {
-    match fs::read(&state.audit_path) {
-        Ok(contents) => {
-            let mut headers = header::HeaderMap::new();
-            headers.insert(
-                header::CONTENT_TYPE,
-                header::HeaderValue::from_static("application/jsonl"),
-            );
-            headers.insert(
-                header::CONTENT_DISPOSITION,
-                header::HeaderValue::from_str(
-                    "attachment; filename=\"exec_audit.jsonl\"",
-                )
-                .unwrap(),
-            );
-            (headers, contents).into_response()
-        }
-        Err(_) => StatusCode::NOT_FOUND.into_response(),
-    }
+    let contents = fs::read(&state.audit_path).unwrap_or_default();
+    let mut headers = header::HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/jsonl"),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        header::HeaderValue::from_static("attachment; filename=\"exec_audit.jsonl\""),
+    );
+    (headers, contents).into_response()
 }
 
 /// GET /api/last-exec — return the last execution result for UI polling.
