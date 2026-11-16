@@ -55,6 +55,7 @@ async fn sepolia_gate_rejects_unprofitable_and_never_mainnet() {
     let outcome = simulate_with_backend(
         backend,
         1,
+        1_700_000_000, // block_timestamp: non-zero avoids Aave interest-accrual underflow
         &opportunity,
         U256::from(1_000_000_000_000_000_000u128), // 1 ETH min profit
         U256::ZERO,

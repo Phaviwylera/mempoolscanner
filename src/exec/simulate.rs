@@ -146,6 +146,7 @@ pub struct CodeOverride {
 ///
 /// Read-only: the EVM runs in-process against a `CacheDB` over the state
 /// backend. Nothing is signed and nothing is broadcast.
+#[allow(clippy::too_many_arguments)]
 pub async fn simulate_raw_call(
     backend: Arc<dyn StateBackend>,
     block: u64,

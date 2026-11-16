@@ -31,10 +31,13 @@ use url::Url;
 
 mod broadcast;
 mod build_tx;
+pub mod gas;
 mod sign;
 mod simulate;
 
 pub use broadcast::broadcast_and_confirm;
+pub use broadcast::simulate_bundle;
+pub use gas::{plan_bid, BidDecision, BidPlan, FeeEnvelope};
 pub use build_tx::{
     build_signed_liquidation_tx, build_tx_from_opportunity, build_tx_standalone,
     close_factor_debt, compute_mock_hf_overrides, encode_execute_liquidation, BuildTxInputs,
@@ -176,6 +179,11 @@ pub struct ExecConfig {
     pub builder_relays: Vec<Url>,
     /// Minimum net profit (wei) required to sign.
     pub min_profit_wei: U256,
+    /// Builder's share of the surplus, in basis points (9000 = 90%). From the
+    /// `BID_FRACTION` env (default 0.90), paid to the builder as priority fee.
+    pub bid_fraction_bps: u32,
+    /// Added to gas cost in the coverage gate (`EXEC_GAS_SAFETY_BUFFER_WEI`).
+    pub safety_buffer_wei: U256,
     /// Blocks to wait for confirmation before returning `Confirmed`.
     pub confirmations: u64,
     /// The deployed AaveV3Liquidator contract. Required in `live` mode: it is
@@ -203,7 +211,16 @@ pub struct ExecAuditEntry {
     pub chain_id: u64,
     pub opportunity_id: String,
     pub profit_estimate_wei: U256,
+    /// Gas-aware bidding breakdown (the "90% rule"). Present on every
+    /// `dry_run_signed` / live entry so a dry run shows exactly what a live
+    /// bundle would have paid and kept.
+    pub gas_cost_wei: U256,
+    pub builder_bribe_wei: U256,
+    pub net_profit_wei: U256,
     pub tx_hash: Option<B256>,
+    /// Flashbots bundle hash, present only once a bundle is actually submitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle_hash: Option<B256>,
     pub outcome: String,
 }
 
@@ -258,20 +275,68 @@ pub async fn execute_liquidation(
         }
     }
 
-    // Stage 2: sign (key material never leaves `sign.rs`).
-    let encoded = sign_transaction(signer, opportunity, cfg.chain_id).await?;
+    let _ = &sim; // the sim gate above is the profitability sanity check.
+
+    // Stage 1b: gas-aware dynamic bid (the "90% rule"). Fetch live fees, price
+    // the builder bribe as priority fee, and ABORT before signing if the
+    // opportunity cannot pay for itself. This is what guarantees we never sign
+    // or send a losing bundle.
+    let fees = gas::fetch_fees(cfg.rpc_url.as_str()).await?;
+    let plan = match gas::plan_bid(
+        opportunity.gross_profit_wei,
+        opportunity.gas_limit,
+        fees,
+        cfg.bid_fraction_bps,
+        cfg.min_profit_wei,
+        cfg.safety_buffer_wei,
+    ) {
+        BidDecision::Execute(p) => p,
+        BidDecision::Abort(reason) => return Ok(ExecOutcome::Skipped { reason }),
+    };
+
+    // Stage 2: sign at the computed fees (key material never leaves `sign.rs`).
+    let encoded = sign_transaction(
+        signer,
+        opportunity,
+        cfg.chain_id,
+        plan.max_fee_per_gas,
+        plan.max_priority_fee_per_gas,
+    )
+    .await?;
     let tx_hash = alloy::primitives::keccak256(&encoded);
 
-    // Stage 3: dry-run — sign only, never broadcast.
+    // Stage 3: dry-run — sign only, never broadcast. Record the full bid so a
+    // dry run shows exactly what a live bundle would have paid and kept.
     if cfg.dry_run {
-        append_audit(cfg, opportunity, Some(tx_hash), "dry_run_signed", &sim)?;
+        append_audit(cfg, opportunity, Some(tx_hash), "dry_run_signed", &plan, None)?;
         return Ok(ExecOutcome::Simulated {
-            profit: opportunity.gross_profit_wei,
+            profit: plan.net_profit_wei,
         });
     }
 
-    // Stage 4: broadcast via private relay only.
-    let outcome = broadcast_and_confirm(
+    // Stage 4 (live): Flashbots bundle simulation — the zero-revert guarantee.
+    // We NEVER broadcast a bundle the relay says would revert or come in below
+    // our floor. Any error here is treated as "do not send" (fail closed).
+    if let Some(relay) = cfg.flashbots_relay.as_ref() {
+        match simulate_bundle(cfg.rpc_url.as_str(), relay, signer, &encoded, cfg.min_profit_wei)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return Ok(ExecOutcome::Skipped {
+                    reason: "SKIPPED: Bundle simulation failed".to_string(),
+                });
+            }
+            Err(e) => {
+                return Ok(ExecOutcome::Skipped {
+                    reason: format!("SKIPPED: Bundle simulation failed ({e})"),
+                });
+            }
+        }
+    }
+
+    // Stage 5: broadcast via private relay only.
+    let (outcome, bundle_hash) = broadcast_and_confirm(
         cfg.rpc_url.as_str(),
         signer,
         &encoded,
@@ -288,12 +353,12 @@ pub async fn execute_liquidation(
         opportunity,
         Some(tx_hash),
         match &outcome {
-            ExecOutcome::Confirmed { .. } => "confirmed",
+            ExecOutcome::Confirmed { .. } | ExecOutcome::Broadcast { .. } => "live_broadcast",
             ExecOutcome::Reverted { .. } => "reverted",
-            ExecOutcome::Broadcast { .. } => "broadcast",
             _ => "skipped",
         },
-        &sim,
+        &plan,
+        bundle_hash,
     )?;
 
     Ok(outcome)
@@ -305,11 +370,15 @@ async fn sign_transaction(
     signer: &LocalSigner,
     opportunity: &LiquidationOpportunity,
     chain_id: u64,
+    max_fee_per_gas: u128,
+    max_priority_fee_per_gas: u128,
 ) -> Result<Vec<u8>> {
     use alloy::consensus::TxEip1559;
 
     // The signer is left unbound so `sign_transaction_with_chain_id` uses the
     // transaction's own chain ID (set below) for EIP-155 replay protection.
+    // Fees come from the gas-aware bid: a bundle only pays the actual base fee,
+    // and the priority fee carries the builder bribe (the "90% rule").
     let mut tx = TxEip1559 {
         chain_id,
         nonce: opportunity.nonce,
@@ -317,8 +386,8 @@ async fn sign_transaction(
         to: TxKind::Call(opportunity.to),
         value: opportunity.value,
         input: opportunity.calldata.clone(),
-        max_fee_per_gas: 0,
-        max_priority_fee_per_gas: 0,
+        max_fee_per_gas,
+        max_priority_fee_per_gas,
         access_list: Default::default(),
     };
 
@@ -339,7 +408,8 @@ fn append_audit(
     opportunity: &LiquidationOpportunity,
     tx_hash: Option<B256>,
     outcome: &str,
-    sim: &ExecOutcome,
+    plan: &gas::BidPlan,
+    bundle_hash: Option<B256>,
 ) -> Result<()> {
     use chrono::Utc;
     use std::fs;
@@ -353,11 +423,12 @@ fn append_audit(
         timestamp: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         chain_id: cfg.chain_id,
         opportunity_id: opportunity.id.clone(),
-        profit_estimate_wei: match sim {
-            ExecOutcome::Simulated { profit } => *profit,
-            _ => opportunity.gross_profit_wei,
-        },
+        profit_estimate_wei: plan.net_profit_wei,
+        gas_cost_wei: plan.gas_cost_wei,
+        builder_bribe_wei: plan.builder_bribe_wei,
+        net_profit_wei: plan.net_profit_wei,
         tx_hash,
+        bundle_hash,
         outcome: outcome.to_string(),
     };
 

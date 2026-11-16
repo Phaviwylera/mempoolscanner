@@ -315,6 +315,10 @@ async fn main() -> Result<()> {
             flashbots_relay,
             builder_relays,
             min_profit_wei,
+            // Gas-aware dynamic bidding (the "90% rule"): BID_FRACTION (default
+            // 0.90) and EXEC_GAS_SAFETY_BUFFER_WEI (default 0).
+            bid_fraction_bps: mempool_scanner::exec::gas::bid_fraction_bps_from_env(),
+            safety_buffer_wei: mempool_scanner::exec::gas::safety_buffer_from_env(),
             confirmations,
         })
     } else {

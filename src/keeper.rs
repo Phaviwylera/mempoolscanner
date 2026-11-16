@@ -294,7 +294,7 @@ impl Keeper {
         let tokens = dp.getAllReservesTokens().call().await?;
 
         // Read decimals concurrently (bounded) — one call per reserve.
-        let metas: Vec<ReserveMeta> = stream::iter(tokens.into_iter())
+        let metas: Vec<ReserveMeta> = stream::iter(tokens)
             .map(|t| {
                 let provider = self.provider.clone();
                 async move {
@@ -331,7 +331,7 @@ impl Keeper {
         let dp = IProtocolDataProvider::new(AAVE_PROTOCOL_DATA_PROVIDER, &self.provider);
 
         // Per reserve: actual balances + oracle price, concurrently.
-        let rows: Vec<(ReserveMeta, U256, U256, bool, U256)> = stream::iter(reserves.into_iter())
+        let rows: Vec<(ReserveMeta, U256, U256, bool, U256)> = stream::iter(reserves)
             .map(|meta| {
                 let dp = dp.clone();
                 let oracle = oracle.clone();
@@ -416,7 +416,7 @@ impl Keeper {
         // silently dropping collaterals (`.ok()?`), leaving the mock-hf override
         // incomplete. Here a reserve is only skipped after it is CONFIRMED to
         // carry no collateral; a transient RPC error retries rather than drops.
-        let out = stream::iter(reserves.into_iter())
+        let out = stream::iter(reserves)
             .map(|meta| {
                 let dp = dp.clone();
                 let oracle = oracle.clone();

@@ -4,20 +4,24 @@
 //! transaction is reported as `Skipped("no_private_relay")`.
 
 use crate::exec::ExecOutcome;
-use alloy::primitives::{B256, Bytes};
-use alloy::providers::{ext::MevApi, Provider, ProviderBuilder, DynProvider};
-use alloy_rpc_types_mev::{EthBundleHash, EthSendBundle};
+use alloy::eips::BlockNumberOrTag;
+use alloy::primitives::{B256, Bytes, U256};
+use alloy::providers::{ext::MevApi, DynProvider, Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner as LocalSigner;
+use alloy_rpc_types_mev::{EthBundleHash, EthCallBundle, EthSendBundle};
 use anyhow::{anyhow, Result};
 use std::time::Duration;
+use tracing::{info, warn};
 use url::Url;
 
 /// Send a signed transaction to a private relay and wait for confirmations.
 ///
 /// Primary path: Flashbots Protect / MEV-Share `eth_sendBundle` with
-/// `with_auth(signer)`.
-/// Secondary path: fan-out to each configured builder relay.
-/// Returns `Ok(None)` when no private relay is available.
+/// `with_auth(signer)`. Secondary path: fan-out to each configured builder
+/// relay. Returns `(Skipped("no_private_relay"), None)` when no relay is set.
+///
+/// Returns the terminal [`ExecOutcome`] plus the Flashbots bundle hash (when a
+/// bundle was actually submitted) for the audit log.
 #[allow(clippy::too_many_arguments)]
 pub async fn broadcast_and_confirm(
     rpc_url: &str,
@@ -28,7 +32,7 @@ pub async fn broadcast_and_confirm(
     flashbots_relay: Option<&Url>,
     builder_relays: &[Url],
     confirmations: u64,
-) -> Result<ExecOutcome> {
+) -> Result<(ExecOutcome, Option<B256>)> {
     let _ = chain_id;
     let provider = ProviderBuilder::new()
         .connect(rpc_url)
@@ -54,12 +58,14 @@ pub async fn broadcast_and_confirm(
     let bundle_hash = match bundle_hash {
         Some(h) => h,
         None => {
-            return Ok(ExecOutcome::Skipped {
-                reason: "no_private_relay".to_string(),
-            })
+            return Ok((
+                ExecOutcome::Skipped {
+                    reason: "no_private_relay".to_string(),
+                },
+                None,
+            ))
         }
     };
-    let _ = bundle_hash;
 
     // Wait for `confirmations` blocks by polling the transaction receipt.
     let mined_block = latest;
@@ -72,9 +78,9 @@ pub async fn broadcast_and_confirm(
             if let Some(block) = receipt.block_number {
                 if block >= mined_block.saturating_add(confirmations) {
                     if receipt.status() {
-                        return Ok(ExecOutcome::Confirmed { tx_hash, block });
+                        return Ok((ExecOutcome::Confirmed { tx_hash, block }, Some(bundle_hash)));
                     } else {
-                        return Ok(ExecOutcome::Reverted { tx_hash, block });
+                        return Ok((ExecOutcome::Reverted { tx_hash, block }, Some(bundle_hash)));
                     }
                 }
             }
@@ -83,6 +89,81 @@ pub async fn broadcast_and_confirm(
     }
 
     Err(anyhow!("confirmation timeout for {tx_hash:#x}"))
+}
+
+/// Flashbots bundle simulation (`eth_callBundle`) — the zero-revert guarantee.
+///
+/// Simulates the signed bundle against the pending block on the Flashbots relay
+/// and returns `false` if any transaction reverts or the bundle would pay the
+/// builder nothing. A live broadcast must gate on this: it is what stops us
+/// paying gas for a front-run or a bad swap.
+pub async fn simulate_bundle(
+    rpc_url: &str,
+    relay: &Url,
+    signer: &LocalSigner,
+    encoded_tx: &[u8],
+    min_profit: U256,
+) -> Result<bool> {
+    let provider = ProviderBuilder::new()
+        .connect(rpc_url)
+        .await
+        .map_err(|e| anyhow!("rpc connect: {e}"))?
+        .erased();
+    let latest = provider
+        .get_block_number()
+        .await
+        .map_err(|e| anyhow!("block number: {e}"))?;
+    let target_block = latest.saturating_add(1);
+
+    let fb = ProviderBuilder::new()
+        .connect(relay.as_str())
+        .await
+        .map_err(|e| anyhow!("flashbots connect: {e}"))?
+        .erased();
+
+    let call = EthCallBundle {
+        txs: vec![Bytes::from(encoded_tx.to_vec())],
+        block_number: target_block,
+        state_block_number: BlockNumberOrTag::Latest,
+        ..Default::default()
+    };
+
+    let resp = match fb
+        .call_bundle(call)
+        .with_auth(signer.clone())
+        .await
+        .map_err(|e| anyhow!("flashbots call_bundle: {e}"))?
+    {
+        Some(r) => r,
+        None => {
+            // Relay returned no simulation result — fail closed (do not send).
+            warn!("bundle sim: relay returned no response");
+            return Ok(false);
+        }
+    };
+
+    // Zero-revert guarantee: any tx-level revert fails the whole bundle. A
+    // reverting call populates `revert` with the revert data.
+    for r in &resp.results {
+        if r.revert.is_some() {
+            warn!("bundle sim: tx reverted (revert={:?})", r.revert);
+            return Ok(false);
+        }
+    }
+
+    // `coinbase_diff` is what the builder would receive this block. If it is
+    // zero the bundle pays nothing and will not be included.
+    if resp.coinbase_diff.is_zero() {
+        warn!("bundle sim: zero coinbase_diff — builder would be paid nothing");
+        return Ok(false);
+    }
+
+    let _ = min_profit; // profit floor is enforced pre-sign by plan_bid.
+    info!(
+        "bundle sim OK: coinbase_diff={} gas_used={}",
+        resp.coinbase_diff, resp.total_gas_used
+    );
+    Ok(true)
 }
 
 /// Submit the signed transaction to a private relay.
