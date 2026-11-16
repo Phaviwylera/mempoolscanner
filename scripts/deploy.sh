@@ -59,7 +59,9 @@ if [ -f "$REPO/deploy/nginx-mempolscan.conf" ]; then
   install -m644 "$REPO/deploy/nginx-mempolscan.conf" /etc/nginx/sites-available/mempolscan
   ln -sf /etc/nginx/sites-available/mempolscan /etc/nginx/sites-enabled/mempolscan
 fi
-nginx -t && systemctl reload nginx
+# restart (not reload): a graceful reload was observed NOT to pick up location
+# changes reliably on this host, leaving /api/* served by stale workers.
+nginx -t && systemctl restart nginx
 systemctl restart mempolscan.service mempolscan-api.service || true
 
 echo "==> [5/5] Smoke test"
