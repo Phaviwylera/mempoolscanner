@@ -1,7 +1,7 @@
 node_modules
-# dist is intentionally committed: the EC2 box has no Node toolchain, so the
-# Rust server serves a prebuilt web-dash/dist straight from `git pull`. Rebuild
-# it locally with `npm run build` and commit the result when the dashboard changes.
+# dist is a build artifact: EC2 now has a Node toolchain and builds it in place
+# via scripts/deploy.sh (git pull -> npm ci -> npm run build). Never commit it.
+dist
 dist-ssr
 *.local
 .vite
