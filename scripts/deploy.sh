@@ -21,9 +21,11 @@ echo "==> [1/5] Sync $REPO to origin/$BRANCH"
 git config --system --add safe.directory "$REPO" 2>/dev/null || true
 cd "$REPO"
 git fetch --prune origin
-# The box is often left on a detached HEAD by the first deploy; force it onto
-# the branch so future pulls are trivial.
-git checkout -B "$BRANCH" "origin/$BRANCH"
+# Discard any working-tree drift first (a cargo build can leave Cargo.lock
+# dirty, which would otherwise make the checkout abort), then force onto the
+# branch — the box is often left on a detached HEAD by the first deploy.
+git reset --hard "origin/$BRANCH"
+git checkout -f -B "$BRANCH" "origin/$BRANCH"
 git reset --hard "origin/$BRANCH"
 echo "    now at $(git rev-parse --short HEAD) — $(git log -1 --pretty=%s)"
 
