@@ -52,10 +52,15 @@ else
   echo "==> [3/5] Skipping Rust backend rebuild (pass --backend to include it)"
 fi
 
-echo "==> [4/5] Reload nginx + restart app services"
+echo "==> [4/5] Install nginx config + restart app services"
+# The repo is the source of truth for the nginx config, so a deploy can never
+# silently drop the /api/ catch-all again. Install it and re-link.
+if [ -f "$REPO/deploy/nginx-mempolscan.conf" ]; then
+  install -m644 "$REPO/deploy/nginx-mempolscan.conf" /etc/nginx/sites-available/mempolscan
+  ln -sf /etc/nginx/sites-available/mempolscan /etc/nginx/sites-enabled/mempolscan
+fi
 nginx -t && systemctl reload nginx
 systemctl restart mempolscan.service mempolscan-api.service || true
-systemctl restart mempolscan.service 2>/dev/null || true
 
 echo "==> [5/5] Smoke test"
 sleep 2
