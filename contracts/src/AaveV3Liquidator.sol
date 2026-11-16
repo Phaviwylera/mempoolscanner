@@ -5,7 +5,8 @@ import {IFlashLoanSimpleReceiver} from "./interfaces/IFlashLoanSimpleReceiver.so
 import {IPool} from "./interfaces/IPool.sol";
 import {IPoolAddressesProvider} from "./interfaces/IPoolAddressesProvider.sol";
 import {ISwapRouter02} from "./interfaces/ISwapRouter02.sol";
-import {IERC20} from "./interfaces/IERC20.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
@@ -25,6 +26,8 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  * receives profit; `executor` is the hot key allowed to trigger liquidations.
  */
 contract AaveV3Liquidator is IFlashLoanSimpleReceiver, Ownable2Step, ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
     IPool public immutable POOL;
     ISwapRouter02 public immutable SWAP_ROUTER;
 
@@ -137,13 +140,13 @@ contract AaveV3Liquidator is IFlashLoanSimpleReceiver, Ownable2Step, ReentrancyG
         require(balance >= amountOwed, "CANNOT_REPAY");
 
         // The pool pulls amountOwed from us after this returns.
-        IERC20(asset).approve(address(POOL), amountOwed);
+        IERC20(asset).forceApprove(address(POOL), amountOwed);
 
         // Profit is only what sits ABOVE the repayment. Sweeping the whole
         // balance would leave the pool nothing to pull and revert everything.
         uint256 profit = balance - amountOwed;
         if (profit > 0) {
-            IERC20(asset).transfer(owner(), profit);
+            IERC20(asset).safeTransfer(owner(), profit);
         }
 
         emit LiquidationExecuted(q.user, q.debtAsset, amount, seized, profit);
@@ -163,7 +166,7 @@ contract AaveV3Liquidator is IFlashLoanSimpleReceiver, Ownable2Step, ReentrancyG
         // contract, so the pool needs an allowance before the call -- not just
         // the later one for the flash-loan repayment. Without this the call
         // reverts with "ERC20: transfer amount exceeds allowance".
-        IERC20(debtAsset).approve(address(POOL), debtToCover);
+        IERC20(debtAsset).forceApprove(address(POOL), debtToCover);
 
         // receiveAToken=false: take the underlying, which is what gets swapped.
         POOL.liquidationCall(collateralAsset, debtAsset, user, debtToCover, false);
@@ -185,7 +188,7 @@ contract AaveV3Liquidator is IFlashLoanSimpleReceiver, Ownable2Step, ReentrancyG
         uint256 amountIn,
         uint256 minOut
     ) private {
-        IERC20(tokenIn).approve(address(SWAP_ROUTER), amountIn);
+        IERC20(tokenIn).forceApprove(address(SWAP_ROUTER), amountIn);
 
         SWAP_ROUTER.exactInputSingle(
             ISwapRouter02.ExactInputSingleParams({
@@ -209,9 +212,9 @@ contract AaveV3Liquidator is IFlashLoanSimpleReceiver, Ownable2Step, ReentrancyG
     }
 
     /// @notice Recover tokens sent here by accident. Owner only.
-    function rescueTokens(address token, uint256 amount, address to) external onlyOwner {
+    function rescueTokens(address token, uint256 amount, address to) external onlyOwner nonReentrant {
         require(to != address(0), "ZERO_RECIPIENT");
-        IERC20(token).transfer(to, amount);
+        IERC20(token).safeTransfer(to, amount);
         emit TokenRescued(token, amount, to);
     }
 }
