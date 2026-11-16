@@ -147,7 +147,14 @@ pub struct SvrConfig {
     pub sse_url: String,
     /// Allowlist of SVR feed addresses (`SVR_FEEDS`).
     pub feeds: HashSet<Address>,
+    /// `SVR_DEBUG_HINTS=1`: log a bounded sample of RAW hint frames so the real
+    /// MEV-Share schema can be captured and validated. Observability only.
+    pub debug_hints: bool,
 }
+
+/// How many raw hint frames to log when `debug_hints` is on, before going quiet
+/// (prevents flooding the journal while still capturing a representative sample).
+pub const DEBUG_HINT_SAMPLE: usize = 50;
 
 impl SvrConfig {
     /// Build from env. Returns `None` (SVR disabled) when no feeds are
@@ -162,7 +169,10 @@ impl SvrConfig {
             .ok()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "https://mev-share.flashbots.net".to_string());
-        Some(Self { sse_url, feeds })
+        let debug_hints = std::env::var("SVR_DEBUG_HINTS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        Some(Self { sse_url, feeds, debug_hints })
     }
 }
 
@@ -239,11 +249,27 @@ where
     // SSE frames are separated by a blank line; each carries one `data:` JSON.
     let mut stream = resp.bytes_stream();
     let mut buf = String::new();
+    let mut debug_logged = 0usize;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| anyhow!("stream read: {e}"))?;
         buf.push_str(&String::from_utf8_lossy(&chunk));
         while let Some(pos) = buf.find("\n\n") {
             let frame: String = buf.drain(..pos + 2).collect();
+            // Discovery aid: log a bounded sample of raw hint JSON so the real
+            // MEV-Share schema can be inspected. Pure observability.
+            if cfg.debug_hints && debug_logged < DEBUG_HINT_SAMPLE {
+                if let Some(data) = frame.lines().find_map(|l| l.strip_prefix("data:")) {
+                    let data = data.trim();
+                    if !data.is_empty() {
+                        let shown: String = data.chars().take(2000).collect();
+                        debug_logged += 1;
+                        info!("SVR raw hint [{debug_logged}/{DEBUG_HINT_SAMPLE}]: {shown}");
+                        if debug_logged == DEBUG_HINT_SAMPLE {
+                            info!("SVR raw-hint sample complete; set SVR_DEBUG_HINTS=0 and restart to stop");
+                        }
+                    }
+                }
+            }
             if let Some(cand) = parse_hint_frame(&frame, &cfg.feeds) {
                 on_candidate(cand).await;
             }
