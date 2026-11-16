@@ -271,6 +271,12 @@ where
                     }
                 }
             }
+            // Always-on, targeted diagnostic: log every forward() sighting
+            // (rare across the stream) so a real SVR update is visible the
+            // moment it lands, even after the raw-hint sample is done — and so
+            // we can see whether its feed matches the allowlist.
+            log_forward_sightings(&frame, &cfg.feeds);
+
             if let Some(cand) = parse_hint_frame(&frame, &cfg.feeds) {
                 on_candidate(cand).await;
             }
@@ -344,6 +350,41 @@ pub async fn handle_svr_candidate(
         match crate::exec::execute_svr_backrun(cfg, &opp, cand.hint_tx).await {
             Ok(outcome) => info!("SVR back-run outcome for {:?}: {outcome:?}", opp.borrower),
             Err(e) => warn!("SVR back-run failed for {:?}: {e}", opp.borrower),
+        }
+    }
+}
+
+/// Log every `forward()`-selector sighting in a hint (rare across the stream),
+/// whether or not its feed is allowlisted or decoding succeeds. This is the key
+/// validation diagnostic: it shows the real SVR update the moment it appears and
+/// whether its decoded feed matches `SVR_FEEDS`.
+fn log_forward_sightings(frame: &str, feeds: &HashSet<Address>) {
+    let Some(data) = frame
+        .lines()
+        .find_map(|l| l.strip_prefix("data:"))
+        .map(str::trim)
+    else {
+        return;
+    };
+    let Ok(hint) = serde_json::from_str::<MevShareHint>(data) else {
+        return;
+    };
+    for tx in &hint.txs {
+        let Some(cd) = tx.call_data.as_ref() else {
+            continue;
+        };
+        if cd.len() < 4 || cd[0..4] != FORWARD_SELECTOR {
+            continue;
+        }
+        match decode_svr_forward(cd) {
+            Ok(u) => info!(
+                hint_tx = %hint.hash,
+                feed = %u.feed,
+                median_price = %u.median_price,
+                allowlisted = feed_is_allowed(feeds, u.feed),
+                "SVR forward() hint seen"
+            ),
+            Err(e) => info!(hint_tx = %hint.hash, "SVR forward() hint seen but decode failed: {e}"),
         }
     }
 }
