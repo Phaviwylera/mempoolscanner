@@ -11,3 +11,4 @@ pub mod oracle;
 pub mod pipeline;
 pub mod sim;
 pub mod state;
+pub mod svr;

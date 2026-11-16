@@ -227,6 +227,56 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Phase 6: Chainlink SVR back-running via Flashbots MEV-Share. Opt-in via
+    // SVR_FEEDS (+ optional MEV_SHARE_SSE_URL). When disabled or unavailable the
+    // normal dry-run keeper keeps running untouched (fallback #5).
+    let svr_handle = match mempool_scanner::svr::SvrConfig::from_env() {
+        Some(svr_cfg) => {
+            let keeper_for_svr = keeper.clone();
+            info!(
+                "SVR back-runner enabled ({} feed(s), url={})",
+                svr_cfg.feeds.len(),
+                svr_cfg.sse_url
+            );
+            Some(tokio::spawn(async move {
+                mempool_scanner::svr::run_svr_backrunner(svr_cfg, move |cand| {
+                    let keeper = keeper_for_svr.clone();
+                    async move {
+                        info!(
+                            feed = %cand.update.feed,
+                            median_price = %cand.update.median_price,
+                            hint_tx = %cand.hint_tx,
+                            "SVR update detected; re-checking borrower health"
+                        );
+                        // Step 4 (detection half): re-check Aave health factors.
+                        // Live same-block bundle submission is gated and pending
+                        // validation against a real SVR tx + feed registry.
+                        match keeper.poll_borrowers().await {
+                            Ok(healths) => {
+                                let n = healths.iter().filter(|h| h.is_liquidatable).count();
+                                if n == 0 {
+                                    info!("SVR: no borrower liquidatable after {}", cand.hint_tx);
+                                } else {
+                                    warn!(
+                                        "SVR BACKRUN CANDIDATE: {n} liquidatable borrower(s) after \
+                                         {} on feed {} — bundle submission pending live validation",
+                                        cand.hint_tx, cand.update.feed
+                                    );
+                                }
+                            }
+                            Err(e) => warn!("SVR: keeper poll failed: {e}"),
+                        }
+                    }
+                })
+                .await;
+            }))
+        }
+        None => {
+            info!("SVR back-runner disabled (set SVR_FEEDS to enable)");
+            None
+        }
+    };
+
     let api_addr: SocketAddr = env::var("API_ADDR")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -331,6 +381,10 @@ async fn main() -> Result<()> {
     run_scanner(settings, exec_config.map(Arc::new), recent_opportunities).await?;
 
     if let Some(handle) = oracle_handle {
+        handle.abort();
+        let _ = handle.await;
+    }
+    if let Some(handle) = svr_handle {
         handle.abort();
         let _ = handle.await;
     }
