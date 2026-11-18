@@ -362,14 +362,23 @@ pub async fn build_signed_liquidation_tx(
 
     let backend: Arc<dyn StateBackend> = Arc::new(RpcStateBackend::new(provider));
 
-    // Search debtToCover downward. Aave V3.3's dust rule reverts a partial
+    // Search debtToCover downward. Aave's dust rule reverts a partial
     // liquidation that would leave the reserve's remaining debt (or the seized
     // collateral leftover) non-zero but below the ~1000-base-currency minimum
-    // (MustNotLeaveDust, 0xb629b0e4). The close-factor amount often trips it, so
-    // on that specific revert we halve debtToCover and re-simulate until the
-    // liquidation actually succeeds, and sign THAT amount. Other reverts are not
-    // retried (reducing would not help).
-    const MUST_NOT_LEAVE_DUST: [u8; 4] = [0xb6, 0x29, 0xb0, 0xe4];
+    // (MustNotLeaveDust). The close-factor amount often trips it, so on that
+    // specific revert we halve debtToCover and re-simulate until the liquidation
+    // actually succeeds, and sign THAT amount. Other reverts are not retried
+    // (reducing would not help).
+    //
+    // The custom-error selector has differed across Aave releases — 0xb629b0e4 on
+    // earlier builds, 0x930bb771 observed on mainnet Aave V3.3 — so match both.
+    // We deliberately do NOT pass type(uint256).max as debtToCover: the contract
+    // flash-loans debtToCover (AaveV3Liquidator.flashLoanSimple), so uint256.max
+    // would try to borrow an impossible amount and revert on every liquidation.
+    const DUST_SELECTORS: [[u8; 4]; 2] = [
+        [0xb6, 0x29, 0xb0, 0xe4],
+        [0x93, 0x0b, 0xb7, 0x71],
+    ];
     let mut debt_to_cover = inputs.debt_to_cover;
     let mut calldata = encode_execute_liquidation(
         inputs.user, inputs.collateral, inputs.debt_asset, debt_to_cover, inputs.swap_fee, inputs.min_profit,
@@ -393,7 +402,7 @@ pub async fn build_signed_liquidation_tx(
 
         let is_dust = !sim.success
             && sim.output.len() >= 4
-            && sim.output[0..4] == MUST_NOT_LEAVE_DUST;
+            && DUST_SELECTORS.iter().any(|s| sim.output[0..4] == *s);
         if sim.success || !is_dust || reductions >= 10 || debt_to_cover <= U256::from(1u8) {
             break;
         }
