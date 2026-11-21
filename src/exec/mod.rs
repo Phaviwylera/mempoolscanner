@@ -25,6 +25,7 @@ use alloy::primitives::{Address, B256, Bytes, TxKind, U256};
 use alloy::signers::local::PrivateKeySigner as LocalSigner;
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
+use alloy::providers::{Provider, ProviderBuilder};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use tracing::info;
@@ -226,6 +227,74 @@ pub struct ExecAuditEntry {
     pub outcome: String,
 }
 
+/// Turn a keeper-resolved opportunity into an EXECUTABLE one.
+///
+/// `keeper::liquidation_opportunity` fills in display placeholders — `to` is the
+/// Aave Pool, `calldata` is empty, `nonce` is 0 — because it only detects, it
+/// does not build the transaction. Signing that as-is would broadcast a no-op to
+/// the Pool and liquidate nothing. This rebuilds it the way `build_tx` does:
+/// `to` = our liquidator, real `executeLiquidation` calldata, and the signer's
+/// live pending nonce. An already-executable opportunity (built by `build_tx`)
+/// is returned unchanged.
+async fn executable_opportunity(
+    cfg: &ExecConfig,
+    signer: &LocalSigner,
+    opp: &LiquidationOpportunity,
+) -> Result<LiquidationOpportunity> {
+    let liquidator = cfg
+        .liquidator
+        .ok_or_else(|| anyhow!("EXEC_LIQUIDATOR_ADDRESS required to execute"))?;
+
+    // Already executable (non-empty calldata targeting the liquidator)?
+    if !opp.calldata.is_empty() && opp.to == liquidator {
+        return Ok(opp.clone());
+    }
+
+    let borrower = opp.borrower.ok_or_else(|| anyhow!("opportunity has no borrower"))?;
+    let collateral = opp
+        .collateral
+        .ok_or_else(|| anyhow!("opportunity has no collateral asset"))?;
+    let debt_asset = opp
+        .debt_asset
+        .ok_or_else(|| anyhow!("opportunity has no debt asset"))?;
+    let debt_to_cover = opp
+        .repay_amount
+        .filter(|a| !a.is_zero())
+        .ok_or_else(|| anyhow!("opportunity has no resolved debt amount"))?;
+
+    let swap_fee: u32 = std::env::var("BUILD_TX_SWAP_FEE")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DEFAULT_SWAP_FEE);
+
+    let calldata = encode_execute_liquidation(
+        borrower,
+        collateral,
+        debt_asset,
+        debt_to_cover,
+        swap_fee,
+        cfg.min_profit_wei,
+    );
+
+    let provider = ProviderBuilder::new()
+        .connect(cfg.rpc_url.as_str())
+        .await
+        .map_err(|e| anyhow!("rpc connect: {e}"))?
+        .erased();
+    let nonce = provider
+        .get_transaction_count(signer.address())
+        .pending()
+        .await
+        .map_err(|e| anyhow!("get nonce: {e}"))?;
+
+    let mut out = opp.clone();
+    out.to = liquidator;
+    out.from = signer.address();
+    out.calldata = calldata;
+    out.nonce = nonce;
+    Ok(out)
+}
+
 /// Top-level entry point. The simulation gate is non-bypassable: signing only
 /// happens after `simulate_liquidation` reports `net_profit >= min_profit_wei`.
 pub async fn execute_liquidation(
@@ -242,6 +311,11 @@ pub async fn execute_liquidation(
         .signer
         .as_ref()
         .ok_or_else(|| anyhow!("no signer configured: set EXEC_PRIVATE_KEY or EXEC_KEYSTORE_PATH"))?;
+
+    // Build the real executable tx (to=liquidator, real calldata, live nonce);
+    // the keeper's opportunity is a display placeholder (to=Pool, empty calldata).
+    let exec_opp = executable_opportunity(cfg, signer, opportunity).await?;
+    let opportunity = &exec_opp;
 
     // Stage 1: mandatory pre-sign simulation gate. Even with --execute we never
     // sign unless simulate.rs reports a profitable simulation.
@@ -387,6 +461,11 @@ pub async fn execute_svr_backrun(
         .signer
         .as_ref()
         .ok_or_else(|| anyhow!("no signer configured for SVR back-run"))?;
+
+    // Build the real executable tx — the keeper opportunity is a display
+    // placeholder (to=Pool, empty calldata), which would back-run a no-op.
+    let exec_opp = executable_opportunity(cfg, signer, opportunity).await?;
+    let opportunity = &exec_opp;
 
     // Gas-aware 90% bid — aborts before signing if it cannot pay for itself.
     let fees = gas::fetch_fees(cfg.rpc_url.as_str()).await?;
