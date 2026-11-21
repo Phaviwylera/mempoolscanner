@@ -39,7 +39,9 @@ sol! {
             address debtAsset,
             uint256 debtToCover,
             uint24 swapFee,
-            uint256 minProfit
+            uint256 minProfit,
+            address swapRouter,
+            bytes swapCalldata
         ) external;
     }
 }
@@ -217,6 +219,11 @@ pub struct BuildTxInputs {
     pub debt_to_cover: U256,
     pub swap_fee: u32,
     pub min_profit: U256,
+    /// Generic collateral-exit router + pre-built swap calldata. Default
+    /// `Address::ZERO` + empty uses the contract's Uniswap V3 single-hop (plain
+    /// ERC20 collateral); set for exotic collateral (e.g. sUSDe via Curve).
+    pub swap_router: Address,
+    pub swap_calldata: Bytes,
     pub gas_limit: u64,
     /// TESTING ONLY, fork-only. Precomputed Aave oracle-source bytecode
     /// overrides applied to the revm pre-flight (see `compute_mock_hf_overrides`).
@@ -261,6 +268,12 @@ pub struct BuildTxReport {
 }
 
 /// ABI-encode `executeLiquidation(...)`.
+///
+/// `swap_router` + `swap_calldata` drive the generic collateral-exit route: pass
+/// `Address::ZERO` and an empty `Bytes` to use the contract's Uniswap V3
+/// single-hop (the default for plain-ERC20 collateral), or a vetted router plus
+/// pre-built swap calldata to exit exotic collateral (e.g. sUSDe via Curve).
+#[allow(clippy::too_many_arguments)]
 pub fn encode_execute_liquidation(
     user: Address,
     collateral: Address,
@@ -268,6 +281,8 @@ pub fn encode_execute_liquidation(
     debt_to_cover: U256,
     swap_fee: u32,
     min_profit: U256,
+    swap_router: Address,
+    swap_calldata: Bytes,
 ) -> Bytes {
     use alloy::primitives::aliases::U24;
     // uint24 fee tier. `U24` cannot hold every u32, so clamp the (already
@@ -281,6 +296,8 @@ pub fn encode_execute_liquidation(
         debtToCover: debt_to_cover,
         swapFee: fee,
         minProfit: min_profit,
+        swapRouter: swap_router,
+        swapCalldata: swap_calldata,
     }
     .abi_encode()
     .into()
@@ -382,6 +399,7 @@ pub async fn build_signed_liquidation_tx(
     let mut debt_to_cover = inputs.debt_to_cover;
     let mut calldata = encode_execute_liquidation(
         inputs.user, inputs.collateral, inputs.debt_asset, debt_to_cover, inputs.swap_fee, inputs.min_profit,
+        inputs.swap_router, inputs.swap_calldata.clone(),
     );
     let mut sim;
     let mut reductions = 0u32;
@@ -412,6 +430,7 @@ pub async fn build_signed_liquidation_tx(
         warn!("build-tx: debtToCover hit Aave dust rule; reducing to {debt_to_cover} (attempt {reductions})");
         calldata = encode_execute_liquidation(
             inputs.user, inputs.collateral, inputs.debt_asset, debt_to_cover, inputs.swap_fee, inputs.min_profit,
+            inputs.swap_router, inputs.swap_calldata.clone(),
         );
     }
     if reductions > 0 && sim.success {
@@ -519,6 +538,8 @@ pub async fn build_tx_from_opportunity(
         debt_to_cover,
         swap_fee,
         min_profit,
+        swap_router: Address::ZERO,
+        swap_calldata: Bytes::new(),
         gas_limit,
         oracle_overrides: Vec::new(),
         mock_hf_note: None,
@@ -587,6 +608,8 @@ pub async fn build_tx_standalone(
         debt_to_cover,
         swap_fee,
         min_profit,
+        swap_router: Address::ZERO,
+        swap_calldata: Bytes::new(),
         gas_limit,
         oracle_overrides,
         mock_hf_note,
@@ -602,7 +625,6 @@ mod tests {
 
     #[test]
     fn calldata_has_execute_liquidation_selector() {
-        // selector = keccak256("executeLiquidation(address,address,address,uint256,uint24,uint256)")[0..4]
         let cd = encode_execute_liquidation(
             address!("1111111111111111111111111111111111111111"),
             address!("2222222222222222222222222222222222222222"),
@@ -610,13 +632,16 @@ mod tests {
             U256::from(1000u64),
             DEFAULT_SWAP_FEE,
             U256::ZERO,
+            Address::ZERO,
+            Bytes::new(),
         );
         let expected = &alloy::primitives::keccak256(
-            b"executeLiquidation(address,address,address,uint256,uint24,uint256)",
+            b"executeLiquidation(address,address,address,uint256,uint24,uint256,address,bytes)",
         )[0..4];
         assert_eq!(&cd[0..4], expected);
-        // 4 selector + 6 * 32-byte words.
-        assert_eq!(cd.len(), 4 + 6 * 32);
+        // 4 selector + 8 head words (7 static + 1 bytes offset) + 32 bytes-length
+        // word (empty swapCalldata, zero data bytes).
+        assert_eq!(cd.len(), 4 + 8 * 32 + 32);
     }
 
     #[test]

@@ -33,14 +33,27 @@ contract AaveV3Liquidator is IFlashLoanSimpleReceiver, Ownable2Step, ReentrancyG
 
     address public executor;
 
-    /// @dev Flash-loan params. Decoded as a single memory pointer: five
-    /// separate locals plus the callback's own arguments overflows the stack.
+    /// @notice Owner-managed allowlist of external swap routers the generic
+    /// collateral-exit path may call (Curve pools, 1inch/0x/Odos routers, …).
+    /// The exit calls the router with executor-supplied calldata, so restricting
+    /// it to vetted routers stops a leaked executor key from pointing the seized
+    /// collateral at a malicious contract mid-liquidation.
+    mapping(address => bool) public allowedSwapRouter;
+
+    /// @dev Flash-loan params. Decoded as a single memory pointer: the separate
+    /// locals plus the callback's own arguments overflow the stack otherwise.
     struct LiqParams {
         address user;
         address collateralAsset;
         address debtAsset;
         uint24 swapFee;
         uint256 minProfit;
+        // Generic collateral-exit: when `swapCalldata` is non-empty the seized
+        // collateral is converted to the debt asset by calling `swapRouter` with
+        // `swapCalldata` (built off-chain); otherwise the Uniswap V3 single-hop
+        // (`SWAP_ROUTER`, `swapFee`) is used, exactly as before.
+        address swapRouter;
+        bytes swapCalldata;
     }
 
     event LiquidationExecuted(
@@ -53,6 +66,7 @@ contract AaveV3Liquidator is IFlashLoanSimpleReceiver, Ownable2Step, ReentrancyG
 
     event TokenRescued(address indexed token, uint256 amount, address indexed to);
     event ExecutorUpdated(address indexed oldExecutor, address indexed newExecutor);
+    event SwapRouterAllowed(address indexed router, bool allowed);
 
     modifier onlyExecutor() {
         require(msg.sender == executor, "NOT_EXECUTOR");
@@ -80,9 +94,14 @@ contract AaveV3Liquidator is IFlashLoanSimpleReceiver, Ownable2Step, ReentrancyG
      * @param collateralAsset asset to seize
      * @param debtAsset     asset to repay (also the flash-loaned asset)
      * @param debtToCover   amount of debt to repay, in debtAsset units
-     * @param swapFee       Uniswap V3 fee tier for collateral -> debt
+     * @param swapFee       Uniswap V3 fee tier for collateral -> debt (used only
+     *                      when swapCalldata is empty)
      * @param minProfit     revert unless at least this much debtAsset is left
      *                      over after repaying the loan
+     * @param swapRouter    external router for the generic exit (address(0) +
+     *                      empty swapCalldata selects the Uniswap V3 path)
+     * @param swapCalldata  pre-built collateral->debt swap calldata for
+     *                      swapRouter; empty selects the Uniswap V3 path
      */
     function executeLiquidation(
         address user,
@@ -90,7 +109,9 @@ contract AaveV3Liquidator is IFlashLoanSimpleReceiver, Ownable2Step, ReentrancyG
         address debtAsset,
         uint256 debtToCover,
         uint24 swapFee,
-        uint256 minProfit
+        uint256 minProfit,
+        address swapRouter,
+        bytes calldata swapCalldata
     ) external onlyExecutor nonReentrant {
         require(debtToCover > 0, "ZERO_DEBT");
 
@@ -100,7 +121,9 @@ contract AaveV3Liquidator is IFlashLoanSimpleReceiver, Ownable2Step, ReentrancyG
                 collateralAsset: collateralAsset,
                 debtAsset: debtAsset,
                 swapFee: swapFee,
-                minProfit: minProfit
+                minProfit: minProfit,
+                swapRouter: swapRouter,
+                swapCalldata: swapCalldata
             })
         );
         POOL.flashLoanSimple(address(this), debtAsset, debtToCover, params, 0);
@@ -132,9 +155,22 @@ contract AaveV3Liquidator is IFlashLoanSimpleReceiver, Ownable2Step, ReentrancyG
         uint256 amountOwed = amount + premium;
         uint256 seized = _liquidate(q.collateralAsset, q.debtAsset, q.user, amount);
 
-        // amountOutMinimum doubles as the profitability gate: if the swap
-        // cannot clear the loan plus minProfit, the whole bundle reverts.
-        _swapExactIn(q.collateralAsset, asset, q.swapFee, seized, amountOwed + q.minProfit);
+        if (q.swapCalldata.length > 0) {
+            // Generic exit: convert collateral -> debt through a vetted external
+            // router (collateral with no deep Uniswap V3 pool — e.g. sUSDe and
+            // other vault tokens — routed via Curve or an aggregator). The router
+            // sets its own minOut, so enforce the profit floor here on the
+            // post-swap balance; a bad or thin swap then reverts the bundle.
+            _swapViaRouter(q.collateralAsset, q.swapRouter, q.swapCalldata, seized);
+            require(
+                IERC20(asset).balanceOf(address(this)) >= amountOwed + q.minProfit,
+                "BELOW_MIN_PROFIT"
+            );
+        } else {
+            // amountOutMinimum doubles as the profitability gate: if the swap
+            // cannot clear the loan plus minProfit, the whole bundle reverts.
+            _swapExactIn(q.collateralAsset, asset, q.swapFee, seized, amountOwed + q.minProfit);
+        }
 
         uint256 balance = IERC20(asset).balanceOf(address(this));
         require(balance >= amountOwed, "CANNOT_REPAY");
@@ -201,6 +237,34 @@ contract AaveV3Liquidator is IFlashLoanSimpleReceiver, Ownable2Step, ReentrancyG
                 sqrtPriceLimitX96: 0
             })
         );
+    }
+
+    /// @dev Generic collateral-exit: approve the seized collateral to a vetted
+    /// router and run executor-supplied swap calldata (Curve/1inch/0x/Odos/…).
+    /// The resulting debt asset lands in this contract; the caller enforces the
+    /// profit floor afterwards. The off-chain calldata must swap an amount <= the
+    /// seized collateral; any dust left behind is recoverable via rescueTokens.
+    function _swapViaRouter(
+        address tokenIn,
+        address router,
+        bytes memory data,
+        uint256 amountIn
+    ) private {
+        require(allowedSwapRouter[router], "ROUTER_NOT_ALLOWED");
+        IERC20(tokenIn).forceApprove(router, amountIn);
+        (bool ok, ) = router.call(data);
+        require(ok, "ROUTER_SWAP_FAILED");
+        // Clear any residual allowance the router did not consume.
+        IERC20(tokenIn).forceApprove(router, 0);
+    }
+
+    /// @notice Allow or disallow an external swap router for the generic exit
+    /// path. Owner only. Add vetted routers (e.g. a Curve pool) before using a
+    /// non-empty swapCalldata that targets them.
+    function setSwapRouter(address router, bool allowed) external onlyOwner {
+        require(router != address(0), "ZERO_ROUTER");
+        allowedSwapRouter[router] = allowed;
+        emit SwapRouterAllowed(router, allowed);
     }
 
     /// @notice Rotate the hot executor key. Owner only.

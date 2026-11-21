@@ -495,6 +495,8 @@ async fn run_build_tx(target: &str, mock_hf: Option<f64>) -> Result<()> {
         debt_to_cover,
         swap_fee,
         min_profit,
+        swap_router: alloy::primitives::Address::ZERO,
+        swap_calldata: alloy::primitives::Bytes::new(),
         gas_limit,
         oracle_overrides,
         mock_hf_note,
