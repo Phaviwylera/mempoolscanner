@@ -10,6 +10,12 @@ pub struct Settings {
     pub ws_rpc: String,
     pub ipc_rpc: Option<String>,
     pub state_rpc: String,
+    /// State endpoint for the mempool SCANNER's revm simulations and fork-head
+    /// poll only. Split from `state_rpc` so the scanner's high-volume,
+    /// speculative state reads do not compete with (and rate-limit) the keeper's
+    /// resolution and the execute path, which must stay reliable. Defaults to a
+    /// free public endpoint, leaving `state_rpc`/HTTP_RPC entirely for the keeper.
+    pub scanner_state_rpc: String,
     pub anvil_rpc: Option<String>,
     pub log_path: PathBuf,
     pub max_lag: u64,
@@ -67,6 +73,20 @@ impl Settings {
                 .unwrap_or_else(|| "https://ethereum-rpc.publicnode.com".to_string())
         };
 
+        // Split the scanner's state load off state_rpc. Defaults to publicnode so
+        // the keeper/execute endpoint (HTTP_RPC) is not saturated by the scanner's
+        // per-pending-tx simulations and 3s fork-head poll — the exact load that
+        // was exhausting a low-CUPS Alchemy tier. Set SCANNER_STATE_RPC to a
+        // dedicated second endpoint (e.g. a separate Alchemy app) for reliability.
+        let scanner_state_rpc = non_empty(read_trimmed("SCANNER_STATE_RPC")).unwrap_or_else(|| {
+            warn!(
+                "SCANNER_STATE_RPC unset; scanner simulations + fork-head poll default to \
+                 publicnode so HTTP_RPC stays free for the keeper/execute path. Set \
+                 SCANNER_STATE_RPC to a dedicated endpoint for reliable mempool simulation."
+            );
+            "https://ethereum-rpc.publicnode.com".to_string()
+        });
+
         let log_raw = non_empty(read_trimmed("LOG_PATH"))
             .or_else(|| non_empty(read_trimmed("MEMPOLSCAN_LOG_PATH")))
             .unwrap_or_else(|| "logs/hits.jsonl".to_string());
@@ -75,6 +95,7 @@ impl Settings {
             ws_rpc,
             ipc_rpc,
             state_rpc,
+            scanner_state_rpc,
             anvil_rpc,
             log_path: PathBuf::from(log_raw),
             max_lag: read_u64("FORK_MAX_LAG", 3, 0),

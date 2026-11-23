@@ -328,7 +328,14 @@ pub async fn run_scanner(
 ) -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let state_provider = connect_http_with_retry(&settings.state_rpc).await?;
+    // The scanner's state reads (per-pending-tx revm sims + the fork-head poll)
+    // use scanner_state_rpc, split from state_rpc so this high-volume speculative
+    // load does not rate-limit the keeper/execute endpoint. See Settings.
+    info!(
+        "Scanner state endpoint: {}",
+        one_line_str(&settings.scanner_state_rpc)
+    );
+    let state_provider = connect_http_with_retry(&settings.scanner_state_rpc).await?;
 
     let pubsub_endpoint = settings
         .ipc_rpc
