@@ -236,15 +236,31 @@ const RPC_RETRY_DELAYS_MS: [u64; 3] = [500, 1_000, 2_000];
 ///   -32001  resource (block/state) not found yet at the requested height
 /// HTTP 429 and plain "rate limit" wording are included for the same reason.
 ///
-/// Deliberately narrow: a bad request or a reverted call must NOT be retried.
+/// Providers word their throttle responses inconsistently, so this matches a
+/// bare `429` (the HTTP status, however phrased) and Alchemy's compute-unit
+/// capacity message directly. Alchemy's CUPS error is literally
+/// `error code 429: Your app has exceeded its compute units per second
+/// capacity` — note the words are "exceeded … capacity", NOT "capacity
+/// exceeded", so the old `capacity exceeded` match never caught it and the
+/// retry was skipped on the one error class it mattered most for.
+///
+/// Matching a bare `429` is safe here: this is only ever called on transport /
+/// JSON-RPC errors from read calls (nonce/balance/code/storage/block), never on
+/// EVM revert strings (those go through `describe_revert`, not this path).
+///
+/// Deliberately narrow otherwise: a bad request or a reverted call must NOT be
+/// retried.
 pub(crate) fn is_retryable_rpc_error(msg: &str) -> bool {
     let m = msg.to_ascii_lowercase();
     m.contains("-32005")
         || m.contains("-32001")
         || m.contains("rate limit")
         || m.contains("too many requests")
-        || m.contains("429 too many requests")
+        || m.contains("429")
         || m.contains("capacity exceeded")
+        || m.contains("compute units per second")
+        || m.contains("compute unit")
+        || m.contains("exceeded its compute")
 }
 
 /// Run `op`, retrying retryable RPC errors with exponential backoff.
@@ -476,11 +492,13 @@ impl StateBackend for RpcStateBackend {
                 return Ok(h);
             }
 
-            let maybe_block = self
-                .provider
-                .get_block_by_number(BlockNumberOrTag::Number(number))
-                .await
-                .map_err(|e| StateError(one_line_str(&e.to_string())))?;
+            let maybe_block = with_rpc_retry("block_hash", || async move {
+                self.provider
+                    .get_block_by_number(BlockNumberOrTag::Number(number))
+                    .await
+            })
+            .await
+            .map_err(|e| StateError(one_line_str(&e.to_string())))?;
 
             let hash = maybe_block
                 .map(|b| b.header().hash())
@@ -655,6 +673,13 @@ mod retry_tests {
         assert!(is_retryable_rpc_error("error code -32001: block not found"));
         assert!(is_retryable_rpc_error("HTTP status 429 Too Many Requests"));
         assert!(is_retryable_rpc_error("Capacity Exceeded"));
+        // The exact Alchemy CUPS error that slipped past the old classifier:
+        // bare `429`, and "exceeded … capacity" (not "capacity exceeded").
+        assert!(is_retryable_rpc_error(
+            "server returned an error response: error code 429: Your app has \
+             exceeded its compute units per second capacity. If you have \
+             retries enabled, you can safely ignore this message."
+        ));
     }
 
     #[test]
