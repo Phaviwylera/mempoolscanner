@@ -6,6 +6,7 @@
 //! shared `recent_opportunities` map so the API server can surface them.
 
 use crate::exec::LiquidationOpportunity;
+use crate::state::with_rpc_retry;
 use alloy::primitives::{address, Address, Bytes, U256};
 use alloy::providers::{DynProvider, Provider, ProviderBuilder};
 use anyhow::Result;
@@ -291,15 +292,30 @@ impl Keeper {
         }
 
         let dp = IProtocolDataProvider::new(AAVE_PROTOCOL_DATA_PROVIDER, &self.provider);
-        let tokens = dp.getAllReservesTokens().call().await?;
+        // Retry a rate-limited/transient failure: this is the first call in the
+        // resolution chain, so a 429 here fails the whole build-tx with the
+        // misleading "could not resolve a collateral+debt pair". `&dp` is Copy,
+        // so the FnMut retry closure can rebuild the call on each attempt.
+        let dp_ref = &dp;
+        let tokens = with_rpc_retry("getAllReservesTokens", || async move {
+            dp_ref.getAllReservesTokens().call().await
+        })
+        .await?;
 
-        // Read decimals concurrently (bounded) — one call per reserve.
+        // Read decimals concurrently (bounded) — one call per reserve. Lower
+        // concurrency than the fetch loops below: this runs once (cached), so a
+        // gentler burst costs nothing and keeps us under the provider CUPS cap.
         let metas: Vec<ReserveMeta> = stream::iter(tokens)
             .map(|t| {
                 let provider = self.provider.clone();
                 async move {
                     let erc20 = IErc20Meta::new(t.tokenAddress, &provider);
-                    let decimals = erc20.decimals().call().await.unwrap_or(18);
+                    let erc20_ref = &erc20;
+                    let decimals = with_rpc_retry("decimals", || async move {
+                        erc20_ref.decimals().call().await
+                    })
+                    .await
+                    .unwrap_or(18);
                     ReserveMeta {
                         asset: t.tokenAddress,
                         symbol: t.symbol,
@@ -307,7 +323,7 @@ impl Keeper {
                     }
                 }
             })
-            .buffer_unordered(8)
+            .buffer_unordered(4)
             .collect()
             .await;
 
@@ -336,7 +352,17 @@ impl Keeper {
                 let dp = dp.clone();
                 let oracle = oracle.clone();
                 async move {
-                    let data = match dp.getUserReserveData(meta.asset, user).call().await {
+                    // Retry transient/rate-limited failures. Previously a 429
+                    // here returned None, which looks identical to "reserve is
+                    // empty" — so a rate-limited call silently dropped the
+                    // borrower's real collateral or debt and the pair resolution
+                    // came back incomplete or empty.
+                    let dp_ref = &dp;
+                    let data = match with_rpc_retry("getUserReserveData", || async move {
+                        dp_ref.getUserReserveData(meta.asset, user).call().await
+                    })
+                    .await
+                    {
                         Ok(d) => d,
                         Err(_) => return None,
                     };
@@ -345,7 +371,12 @@ impl Keeper {
                     if data.currentATokenBalance.is_zero() && debt.is_zero() {
                         return None;
                     }
-                    let price = oracle.getAssetPrice(meta.asset).call().await.unwrap_or(U256::ZERO);
+                    let oracle_ref = &oracle;
+                    let price = with_rpc_retry("getAssetPrice", || async move {
+                        oracle_ref.getAssetPrice(meta.asset).call().await
+                    })
+                    .await
+                    .unwrap_or(U256::ZERO);
                     Some((
                         meta,
                         data.currentATokenBalance,
@@ -355,7 +386,7 @@ impl Keeper {
                     ))
                 }
             })
-            .buffer_unordered(8)
+            .buffer_unordered(4)
             .filter_map(|x| async move { x })
             .collect()
             .await;
