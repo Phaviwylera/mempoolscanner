@@ -520,7 +520,14 @@ impl Keeper {
     /// Call Aave V3 Pool.getUserAccountData for a borrower.
     async fn get_user_account_data(&self, user: Address) -> Result<UserAccountData> {
         let pool = IPool::new(AAVE_V3_POOL, &self.provider);
-        let data = pool.getUserAccountData(user).call().await?;
+        // Retry transient/rate-limited failures: poll_borrowers calls this once
+        // per tracked borrower, so an un-retried 429 during a poll silently skips
+        // that borrower for the whole cycle — a missed liquidation window.
+        let pool_ref = &pool;
+        let data = with_rpc_retry("getUserAccountData", || async move {
+            pool_ref.getUserAccountData(user).call().await
+        })
+        .await?;
 
         Ok(UserAccountData {
             total_collateral_base: data.totalCollateralBase,

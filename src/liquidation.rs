@@ -5,7 +5,9 @@
 //! `/api/liquidations` never disturb existing mempool observation workflows.
 //! Strictly observational: no private keys, no signing, no transaction broadcasting.
 
-use crate::state::{one_line_str, BlockSnapshot, ForkMonitor, PinnedStateView, StateBackend};
+use crate::state::{
+    one_line_str, with_rpc_retry, BlockSnapshot, ForkMonitor, PinnedStateView, StateBackend,
+};
 use alloy::eips::BlockNumberOrTag;
 use alloy::network::TransactionBuilder;
 use alloy::primitives::{address, Address, Bytes, TxKind, B256, U256};
@@ -519,10 +521,22 @@ async fn fetch_user_account_rpc(provider: &DynProvider, user: Address) -> Option
     let req = TransactionRequest::default()
         .with_to(AAVE_V3_POOL)
         .with_call(&call);
-    let raw = tokio::time::timeout(Duration::from_secs(4), provider.call(req))
-        .await
-        .ok()?
-        .ok()?;
+    // Retry transient 429s: on a rate limit this otherwise returns None, silently
+    // dropping the borrower from discovery (why the monitor sometimes found far
+    // fewer borrowers than exist). Each attempt keeps its own 4s timeout; a
+    // timeout is not retried (mapped to a non-retryable error string).
+    let raw = with_rpc_retry("fetch_user_account", || {
+        let req = req.clone();
+        async move {
+            match tokio::time::timeout(Duration::from_secs(4), provider.call(req)).await {
+                Ok(Ok(bytes)) => Ok(bytes),
+                Ok(Err(e)) => Err(e.to_string()),
+                Err(_) => Err("timeout".to_string()),
+            }
+        }
+    })
+    .await
+    .ok()?;
     decode_user_account_data(&raw)
 }
 
@@ -766,7 +780,9 @@ async fn evaluate_tracked_positions(
                 ))
             }
         })
-        .buffer_unordered(6)
+        // 4 (was 6): each fetch now retries on a 429, so a gentler burst keeps
+        // the discovery scan under the keeper endpoint's rate cap.
+        .buffer_unordered(4)
         .collect()
         .await;
 
