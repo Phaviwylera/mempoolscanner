@@ -17,7 +17,7 @@
 use crate::exec::{
     simulate_raw_call_with_overrides, CodeOverride, LiquidationOpportunity,
 };
-use crate::state::{RpcStateBackend, StateBackend};
+use crate::state::{with_rpc_retry, RpcStateBackend, StateBackend};
 use alloy::consensus::{SignableTransaction, TxEip1559};
 use alloy::network::TxSigner;
 use alloy::primitives::{Address, Bytes, B256, TxKind, U256};
@@ -320,10 +320,15 @@ pub async fn build_signed_liquidation_tx(
     // The liquidator MUST be deployed on the target chain. Calling an address
     // with no code succeeds trivially in the EVM (empty return, ~21-25k gas),
     // which would otherwise look like a passing pre-flight. Fail loudly instead.
-    let code = provider
-        .get_code_at(inputs.liquidator)
-        .await
-        .map_err(|e| anyhow!("get code at liquidator: {e}"))?;
+    // These direct reads share the (possibly rate-limited) state RPC with the
+    // revm pre-flight fetches, so each is retried on a transient 429/rate-limit
+    // rather than hard-failing the whole build — see state::with_rpc_retry.
+    let provider_ref = &provider;
+    let code = with_rpc_retry("get_code_at", || async move {
+        provider_ref.get_code_at(inputs.liquidator).await
+    })
+    .await
+    .map_err(|e| anyhow!("get code at liquidator: {e}"))?;
     if code.is_empty() {
         return Err(anyhow!(
             "No contract code at liquidator address {:#x} on this fork — is EXEC_LIQUIDATOR_ADDRESS the deployed AaveV3Liquidator on this chain?",
@@ -331,27 +336,33 @@ pub async fn build_signed_liquidation_tx(
         ));
     }
 
-    let nonce = provider
-        .get_transaction_count(from)
-        .pending()
-        .await
-        .map_err(|e| anyhow!("get nonce: {e}"))?;
+    let nonce = with_rpc_retry("get nonce", || async move {
+        provider_ref.get_transaction_count(from).pending().await
+    })
+    .await
+    .map_err(|e| anyhow!("get nonce: {e}"))?;
 
     // eth_gasPrice ≈ base + tip; double it for headroom. These are ESTIMATES —
     // the operator can re-price before broadcasting. priority <= max is enforced.
-    let gas_price = provider.get_gas_price().await.unwrap_or(30_000_000_000);
-    let priority = provider
-        .get_max_priority_fee_per_gas()
-        .await
-        .unwrap_or(1_000_000_000);
+    let gas_price = with_rpc_retry("get_gas_price", || async move {
+        provider_ref.get_gas_price().await
+    })
+    .await
+    .unwrap_or(30_000_000_000);
+    let priority = with_rpc_retry("get_max_priority_fee", || async move {
+        provider_ref.get_max_priority_fee_per_gas().await
+    })
+    .await
+    .unwrap_or(1_000_000_000);
     let max_fee_per_gas = gas_price.saturating_mul(2).max(gas_price + priority);
     let max_priority_fee_per_gas = priority.min(max_fee_per_gas);
 
     // --- revm pre-flight at latest block (profitability / revert gate) ---
-    let block = provider
-        .get_block_number()
-        .await
-        .map_err(|e| anyhow!("block number: {e}"))?;
+    let block = with_rpc_retry("get_block_number", || async move {
+        provider_ref.get_block_number().await
+    })
+    .await
+    .map_err(|e| anyhow!("block number: {e}"))?;
     // Real block timestamp so revm doesn't run at 0 (Aave interest/price-cap math
     // underflow-panics at timestamp 0).
     let block_ts = crate::exec::fetch_block_timestamp(&provider, block).await;
